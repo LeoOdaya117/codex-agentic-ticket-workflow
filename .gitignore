@@ -1,0 +1,8 @@
+# Local ticket records can contain private reports, logs, and attachments.
+/tickets/*
+!/tickets/.gitkeep
+/.codex/ticketing/team-inventory.json
+
+# Python runtime artifacts
+**/__pycache__/
+*.py[cod]
