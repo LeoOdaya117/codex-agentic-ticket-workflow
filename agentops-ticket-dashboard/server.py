@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Local-only Codex ticket dashboard; Python standard library."""
-import argparse, json, os, re, subprocess, threading, time, uuid, shutil
+import argparse, json, os, re, subprocess, threading, time, uuid, shutil, sys
 from datetime import datetime, timezone
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -12,6 +12,11 @@ RUNS = {}
 MAX_EVENTS = 2500
 ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$')
 ACTIVE_TICKET_STATUSES = {'investigating', 'planning', 'implementing', 'code review', 'qa testing'}
+PUBLIC_ASSETS = {
+    '/styles.css': ('styles.css', 'text/css; charset=utf-8'),
+    '/theme.js': ('theme.js', 'text/javascript; charset=utf-8'),
+    '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
+}
 
 def now(): return datetime.now(timezone.utc).isoformat()
 def read_text(p, limit=200000):
@@ -63,11 +68,21 @@ def active_ticket_count(ticket_summaries):
     """Count workflow-active tickets, including work started outside this dashboard."""
     return sum(str(t.get('status', '')).strip().casefold() in ACTIVE_TICKET_STATUSES for t in ticket_summaries)
 
+def public_asset(path):
+    """Resolve only dashboard-owned, explicitly allowlisted static assets."""
+    asset = PUBLIC_ASSETS.get(path)
+    if not asset: return None
+    filename, content_type = asset
+    root = (ROOT/'public').resolve()
+    target = (root/filename).resolve()
+    if not target.is_relative_to(root): return None
+    return target, content_type
+
 def detail(repo, tid):
     p=find_ticket_dir(repo,tid)
     if not p: return None
     files={}
-    for name in ['ticket.md','investigation.md','reproduction.md','plan.md','qa-report.md','state.json','tasks.json']:
+    for name in ['ticket.md','investigation.md','reproduction.md','plan.md','qa-report.md','verification.md','state.json','tasks.json']:
         f=p/name
         if f.is_file(): files[name]=read_text(f)
     reports=[]
@@ -75,6 +90,38 @@ def detail(repo, tid):
     if folder.is_dir():
         for f in sorted(folder.glob('*.md'))[:50]: reports.append({'name':f.name,'content':read_text(f,50000)})
     return {'summary':summary(p),'files':files,'reports':reports}
+
+def complete_ticket(repo, ticket_id):
+    """Record an explicit dashboard approval and use the repository state tool."""
+    ticket_dir=find_ticket_dir(repo,ticket_id)
+    if not ticket_dir: raise ValueError('Ticket not found')
+    if str(summary(ticket_dir)['status']).strip().casefold()!='ready for human verification':
+        raise ValueError('Ticket is not Ready for Human Verification')
+    state_tool=repo/'.codex'/'ticketing'/'ticket.py'
+    if not state_tool.is_file() or not state_tool.resolve().is_relative_to(repo.resolve()):
+        raise ValueError('Ticket state tool not found at .codex/ticketing/ticket.py')
+    verification=ticket_dir/'verification.md'
+    if not verification.resolve().is_relative_to(ticket_dir.resolve()):
+        raise ValueError('verification.md must stay inside the ticket directory')
+    record=(f"## Human approval — {now()}\n\n"
+            'Decision: Approved via the AgentOps dashboard.\n\n')
+    try:
+        with verification.open('a',encoding='utf-8',newline='') as f:
+            f.write(record)
+    except OSError as exc:
+        raise RuntimeError(f'Could not write verification.md: {exc}') from exc
+    try:
+        result=subprocess.run([sys.executable,str(state_tool), 'set-status', ticket_id,
+                               'Done','--human-approved'],cwd=repo,capture_output=True,
+                              text=True,encoding='utf-8',errors='replace',timeout=30)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError('Ticket state update timed out; check the ticket status before retrying') from exc
+    if result.returncode:
+        message=(result.stderr or result.stdout or 'Ticket state update failed').strip()
+        raise RuntimeError(message[:2000])
+    if str(summary(ticket_dir)['status']).strip().casefold()!='done':
+        raise RuntimeError('Ticket state tool returned success, but the ticket is not marked Done')
+    return {'message':(result.stdout or f'{ticket_id}: marked Done').strip()}
 
 def update(run_id, **kwargs):
     with LOCK:
@@ -160,7 +207,10 @@ class Handler(BaseHTTPRequestHandler):
                 data={k:v for k,v in r.items() if k!='process'} if r else None
             return self.respond(200,data) if data else self.respond(404,{'error':'Run not found'})
         if path=='/' or path=='/index.html':
-            p=ROOT/'public'/'index.html';b=p.read_bytes();self.send_response(200);self.send_header('Content-Type','text/html; charset=utf-8');self.send_header('Content-Length',str(len(b)));self.end_headers();return self.wfile.write(b)
+            p=ROOT/'public'/'index.html';b=p.read_bytes();self.send_response(200);self.send_header('Content-Type','text/html; charset=utf-8');self.send_header('Cache-Control','no-store');self.send_header('Content-Length',str(len(b)));self.end_headers();return self.wfile.write(b)
+        asset=public_asset(path)
+        if asset:
+            p,content_type=asset;b=p.read_bytes();self.send_response(200);self.send_header('Content-Type',content_type);self.send_header('Cache-Control','no-store');self.send_header('Content-Length',str(len(b)));self.end_headers();return self.wfile.write(b)
         return self.respond(404,{'error':'Not found'})
     def do_POST(self):
         if not local_request_allowed(self.headers, self.server.server_port):
@@ -175,6 +225,9 @@ class Handler(BaseHTTPRequestHandler):
                 if mode not in ('create','process'):raise ValueError('Invalid mode')
                 rid=spawn_codex(self.repo,tid,mode,str(data.get('description','')),data.get('attachments',[]))
                 return self.respond(202,{'run_id':rid})
+            if path.startswith('/api/tickets/') and path.endswith('/complete'):
+                tid=unquote(path[len('/api/tickets/'):-len('/complete')].strip('/'))
+                return self.respond(200,complete_ticket(self.repo,tid))
             if path.startswith('/api/stop/'):
                 rid=path.split('/')[-1]
                 with LOCK:

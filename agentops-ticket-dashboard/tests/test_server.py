@@ -2,7 +2,7 @@ import tempfile, unittest, json
 from pathlib import Path
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from server import tickets, detail, find_ticket_dir, local_request_allowed, active_ticket_count
+from server import ROOT, tickets, detail, find_ticket_dir, local_request_allowed, active_ticket_count, complete_ticket, public_asset
 class TestTicketReading(unittest.TestCase):
     def test_active_ticket_count_uses_ticket_status_not_dashboard_runs(self):
         self.assertEqual(active_ticket_count([
@@ -35,4 +35,33 @@ class TestTicketReading(unittest.TestCase):
         self.assertTrue(local_request_allowed({'Host':'localhost:8765'},8765))
         self.assertFalse(local_request_allowed({'Host':'127.0.0.1:8765','Origin':'https://example.com'},8765))
         self.assertFalse(local_request_allowed({'Host':'attacker.example:8765'},8765))
+    def test_public_assets_are_allowlisted_and_stay_in_dashboard_public_dir(self):
+        for path, filename in [('/styles.css', 'styles.css'), ('/theme.js', 'theme.js'), ('/app.js', 'app.js')]:
+            asset = public_asset(path)
+            self.assertIsNotNone(asset)
+            self.assertEqual(asset[0].name, filename)
+            self.assertTrue(asset[0].is_file())
+            self.assertTrue(asset[0].is_relative_to(ROOT/'public'))
+        self.assertIsNone(public_asset('/../server.py'))
+        self.assertIsNone(public_asset('/unknown.js'))
+    def test_complete_requires_human_verification_status(self):
+        with tempfile.TemporaryDirectory() as t:
+            repo=Path(t);ticket=repo/'tickets'/'TKT-0001';ticket.mkdir(parents=True)
+            (ticket/'ticket.md').write_text('# Test',encoding='utf-8')
+            (ticket/'state.json').write_text(json.dumps({'status':'Implementing'}),encoding='utf-8')
+            with self.assertRaisesRegex(ValueError,'not Ready for Human Verification'):
+                complete_ticket(repo,'TKT-0001')
+            self.assertFalse((ticket/'verification.md').exists())
+    def test_complete_records_explicit_approval_and_uses_state_tool(self):
+        with tempfile.TemporaryDirectory() as t:
+            repo=Path(t);ticket=repo/'tickets'/'TKT-0001';ticket.mkdir(parents=True)
+            (ticket/'ticket.md').write_text('# Test',encoding='utf-8')
+            (ticket/'state.json').write_text(json.dumps({'status':'Ready for Human Verification'}),encoding='utf-8')
+            tool=repo/'.codex'/'ticketing'/'ticket.py';tool.parent.mkdir(parents=True)
+            tool.write_text("import json,sys\nfrom pathlib import Path\np=Path('tickets/TKT-0001/state.json')\ns=json.loads(p.read_text())\nassert sys.argv[1:]==['set-status','TKT-0001','Done','--human-approved']\ns['status']='Done'\np.write_text(json.dumps(s))\nprint('TKT-0001: Ready for Human Verification -> Done')\n",encoding='utf-8')
+            result=complete_ticket(repo,'TKT-0001')
+            self.assertIn('-> Done',result['message'])
+            self.assertIn('Approved via the AgentOps dashboard',(ticket/'verification.md').read_text(encoding='utf-8'))
+            self.assertEqual(json.loads((ticket/'state.json').read_text(encoding='utf-8'))['status'],'Done')
+            self.assertIn('verification.md',detail(repo,'TKT-0001')['files'])
 if __name__=='__main__':unittest.main()
