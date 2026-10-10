@@ -3,6 +3,8 @@
 import argparse, json, os, re, subprocess, threading, time, uuid, shutil, sys
 from datetime import datetime, timezone
 from pathlib import Path
+from email.parser import BytesParser
+from email.policy import default as email_policy
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, unquote
 
@@ -17,6 +19,8 @@ PUBLIC_ASSETS = {
     '/theme.js': ('theme.js', 'text/javascript; charset=utf-8'),
     '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
 }
+MAX_FEEDBACK_UPLOAD = 20 * 1024 * 1024
+MAX_FEEDBACK_FILES = 10
 
 def now(): return datetime.now(timezone.utc).isoformat()
 def read_text(p, limit=200000):
@@ -123,6 +127,73 @@ def complete_ticket(repo, ticket_id):
         raise RuntimeError('Ticket state tool returned success, but the ticket is not marked Done')
     return {'message':(result.stdout or f'{ticket_id}: marked Done').strip()}
 
+def reject_ticket(repo, ticket_id, description, uploads=None):
+    """Save explicit human feedback and reopen a verified ticket for corrections."""
+    ticket_dir=find_ticket_dir(repo,ticket_id)
+    if not ticket_dir: raise ValueError('Ticket not found')
+    if str(summary(ticket_dir)['status']).strip().casefold()!='ready for human verification':
+        raise ValueError('Ticket is not Ready for Human Verification')
+    description=str(description or '').strip()
+    if not description: raise ValueError('Describe what needs correction before reopening the ticket')
+    if len(description)>10000: raise ValueError('Feedback must be 10,000 characters or fewer')
+    uploads=uploads or []
+    if len(uploads)>MAX_FEEDBACK_FILES: raise ValueError(f'Attach no more than {MAX_FEEDBACK_FILES} files')
+    if sum(len(content) for _,content in uploads)>MAX_FEEDBACK_UPLOAD:
+        raise ValueError('Attachments must total 20 MB or less')
+
+    state_tool=repo/'.codex'/'ticketing'/'ticket.py'
+    if not state_tool.is_file() or not state_tool.resolve().is_relative_to(repo.resolve()):
+        raise ValueError('Ticket state tool not found at .codex/ticketing/ticket.py')
+    verification=ticket_dir/'verification.md'
+    if not verification.resolve().is_relative_to(ticket_dir.resolve()):
+        raise ValueError('verification.md must stay inside the ticket directory')
+
+    saved=[]
+    if uploads:
+        attachment_dir=ticket_dir/'attachments'
+        attachment_dir.mkdir(parents=True,exist_ok=True)
+        if not attachment_dir.resolve().is_relative_to(ticket_dir.resolve()):
+            raise ValueError('Ticket attachments must stay inside the ticket directory')
+        for original_name,content in uploads:
+            filename=str(original_name or 'attachment').replace('\\','/').rsplit('/',1)[-1]
+            filename=re.sub(r'[^A-Za-z0-9._-]+','_',filename).strip('._')[:120] or 'attachment'
+            stem,suffix=Path(filename).stem,Path(filename).suffix
+            target=attachment_dir/filename
+            counter=2
+            while target.exists():
+                target=attachment_dir/f'{stem}-{counter}{suffix}'
+                counter+=1
+            if not target.resolve().is_relative_to(attachment_dir.resolve()):
+                raise ValueError('Attachment must stay inside the ticket attachments directory')
+            try:
+                with target.open('xb') as f: f.write(content)
+            except OSError as exc:
+                raise RuntimeError(f'Could not save attachment: {exc}') from exc
+            saved.append(target.relative_to(ticket_dir).as_posix())
+
+    attachment_note=''.join(f'- `{path}`\n' for path in saved) or '- None\n'
+    record=(f'## Human rejection — {now()}\n\n'
+            'Decision: Rejected; corrections requested via the AgentOps dashboard.\n\n'
+            f'### Feedback\n\n{description}\n\n'
+            f'### Attachments\n\n{attachment_note}\n')
+    try:
+        with verification.open('a',encoding='utf-8',newline='') as f: f.write(record)
+    except OSError as exc:
+        raise RuntimeError(f'Could not write verification.md: {exc}') from exc
+    try:
+        result=subprocess.run([sys.executable,str(state_tool),'set-status',ticket_id,'Implementing'],
+                              cwd=repo,capture_output=True,text=True,encoding='utf-8',
+                              errors='replace',timeout=30)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError('Ticket reopen timed out; check the ticket status before retrying') from exc
+    if result.returncode:
+        message=(result.stderr or result.stdout or 'Ticket reopen failed').strip()
+        raise RuntimeError(message[:2000])
+    if str(summary(ticket_dir)['status']).strip().casefold()!='implementing':
+        raise RuntimeError('Ticket state tool returned success, but the ticket was not reopened')
+    return {'message':(result.stdout or f'{ticket_id}: reopened for corrections').strip(),
+            'attachments':saved}
+
 def update(run_id, **kwargs):
     with LOCK:
         run=RUNS.get(run_id)
@@ -140,6 +211,7 @@ def spawn_codex(repo, ticket_id, mode, description='', attachments=None):
     if mode=='process':
         if not find_ticket_dir(repo,ticket_id): raise ValueError('Ticket not found')
         prompt=(f'Use the installed $process-ticket workflow for {ticket_id}. Read repository AGENTS.md and applicable skill instructions. '
+                'If verification.md contains a Human rejection entry, read its feedback and every referenced attachment before planning corrections. '
                 'Investigate and reproduce if possible, plan, delegate via available registered agents, implement, review and QA, '
                 'record truthful evidence in ticket files. Stop at human verification; do not merge or deploy. '
                 'Do not claim test success unless commands actually passed.')
@@ -185,10 +257,29 @@ class Handler(BaseHTTPRequestHandler):
     def respond(self, code, obj):
         content=json.dumps(obj,ensure_ascii=False,default=str).encode()
         self.send_response(code);self.send_header('Content-Type','application/json; charset=utf-8');self.send_header('Cache-Control','no-store');self.send_header('Content-Length',str(len(content)));self.end_headers();self.wfile.write(content)
-    def body(self):
+    def raw_body(self, limit=1024*1024):
         n=int(self.headers.get('Content-Length','0'))
-        if n>1024*1024: raise ValueError('Payload too large')
-        return json.loads(self.rfile.read(n) or b'{}')
+        if n>limit: raise ValueError('Payload too large')
+        return self.rfile.read(n)
+    def body(self):
+        return json.loads(self.raw_body() or b'{}')
+    def multipart(self):
+        raw=self.raw_body(MAX_FEEDBACK_UPLOAD+1024*1024)
+        content_type=self.headers.get('Content-Type','').encode('ascii','strict')
+        message=BytesParser(policy=email_policy).parsebytes(
+            b'MIME-Version: 1.0\r\nContent-Type: '+content_type+b'\r\n\r\n'+raw)
+        if not message.is_multipart(): raise ValueError('Invalid multipart form data')
+        fields={};uploads=[]
+        for part in message.iter_parts():
+            name=part.get_param('name',header='content-disposition')
+            if not name: continue
+            payload=part.get_payload(decode=True) or b''
+            filename=part.get_filename()
+            if filename is not None:
+                if payload: uploads.append((filename,payload))
+            else:
+                fields[name]=payload.decode(part.get_content_charset() or 'utf-8','replace')
+        return fields,uploads
     def do_GET(self):
         if not local_request_allowed(self.headers, self.server.server_port):
             return self.respond(403, {'error':'Local requests only'})
@@ -215,9 +306,25 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not local_request_allowed(self.headers, self.server.server_port):
             return self.respond(403, {'error':'Local requests only'})
+        path=urlparse(self.path).path
+        if path.startswith('/api/tickets/') and path.endswith('/reject'):
+            if not self.headers.get('Content-Type','').lower().startswith('multipart/form-data'):
+                return self.respond(415, {'error':'Content-Type must be multipart/form-data'})
+            try:
+                fields,uploads=self.multipart()
+                tid=unquote(path[len('/api/tickets/'):-len('/reject')].strip('/'))
+                result=reject_ticket(self.repo,tid,fields.get('description',''),uploads)
+                try:
+                    result['run_id']=spawn_codex(self.repo,tid,'process')
+                    result['message']+=f" · Correction run {result['run_id']} started."
+                except (RuntimeError,ValueError) as exc:
+                    result['run_id']=None
+                    result['message']+=f' · Reopened, but Codex could not start: {exc}'
+                return self.respond(202 if result['run_id'] else 200,result)
+            except (ValueError,TypeError) as exc:return self.respond(400,{'error':str(exc)})
+            except RuntimeError as exc:return self.respond(409,{'error':str(exc)})
         if not self.headers.get('Content-Type','').lower().startswith('application/json'):
             return self.respond(415, {'error':'Content-Type must be application/json'})
-        path=urlparse(self.path).path
         try:
             data=self.body()
             if path=='/api/run':

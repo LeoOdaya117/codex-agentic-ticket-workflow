@@ -2,7 +2,7 @@ import tempfile, unittest, json
 from pathlib import Path
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from server import ROOT, tickets, detail, find_ticket_dir, local_request_allowed, active_ticket_count, complete_ticket, public_asset
+from server import ROOT, tickets, detail, find_ticket_dir, local_request_allowed, active_ticket_count, complete_ticket, reject_ticket, public_asset
 class TestTicketReading(unittest.TestCase):
     def test_active_ticket_count_uses_ticket_status_not_dashboard_runs(self):
         self.assertEqual(active_ticket_count([
@@ -64,4 +64,33 @@ class TestTicketReading(unittest.TestCase):
             self.assertIn('Approved via the AgentOps dashboard',(ticket/'verification.md').read_text(encoding='utf-8'))
             self.assertEqual(json.loads((ticket/'state.json').read_text(encoding='utf-8'))['status'],'Done')
             self.assertIn('verification.md',detail(repo,'TKT-0001')['files'])
+    def test_reject_requires_human_verification_and_feedback(self):
+        with tempfile.TemporaryDirectory() as t:
+            repo=Path(t);ticket=repo/'tickets'/'TKT-0001';ticket.mkdir(parents=True)
+            (ticket/'ticket.md').write_text('# Test',encoding='utf-8')
+            (ticket/'state.json').write_text(json.dumps({'status':'Implementing'}),encoding='utf-8')
+            with self.assertRaisesRegex(ValueError,'not Ready for Human Verification'):
+                reject_ticket(repo,'TKT-0001','Needs polish')
+            (ticket/'state.json').write_text(json.dumps({'status':'Ready for Human Verification'}),encoding='utf-8')
+            with self.assertRaisesRegex(ValueError,'Describe what needs correction'):
+                reject_ticket(repo,'TKT-0001','  ')
+            self.assertFalse((ticket/'verification.md').exists())
+    def test_reject_records_feedback_saves_files_and_reopens_ticket(self):
+        with tempfile.TemporaryDirectory() as t:
+            repo=Path(t);ticket=repo/'tickets'/'TKT-0001';ticket.mkdir(parents=True)
+            (ticket/'ticket.md').write_text('# Test',encoding='utf-8')
+            (ticket/'state.json').write_text(json.dumps({'status':'Ready for Human Verification'}),encoding='utf-8')
+            tool=repo/'.codex'/'ticketing'/'ticket.py';tool.parent.mkdir(parents=True)
+            tool.write_text("import json,sys\nfrom pathlib import Path\nassert sys.argv[1:]==['set-status','TKT-0001','Implementing']\np=Path('tickets/TKT-0001/state.json')\ns=json.loads(p.read_text())\ns['status']='Implementing'\np.write_text(json.dumps(s))\nprint('TKT-0001: Ready for Human Verification -> Implementing')\n",encoding='utf-8')
+            result=reject_ticket(repo,'TKT-0001','The layout still clips the label.',[
+                ('../label screenshot.png',b'image-evidence'),
+            ])
+            self.assertIn('-> Implementing',result['message'])
+            self.assertEqual(result['attachments'],['attachments/label_screenshot.png'])
+            self.assertEqual((ticket/'attachments'/'label_screenshot.png').read_bytes(),b'image-evidence')
+            verification=(ticket/'verification.md').read_text(encoding='utf-8')
+            self.assertIn('Decision: Rejected',verification)
+            self.assertIn('The layout still clips the label.',verification)
+            self.assertIn('attachments/label_screenshot.png',verification)
+            self.assertEqual(json.loads((ticket/'state.json').read_text(encoding='utf-8'))['status'],'Implementing')
 if __name__=='__main__':unittest.main()

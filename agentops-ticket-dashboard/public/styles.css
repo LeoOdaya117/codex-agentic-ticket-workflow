@@ -111,7 +111,7 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; }
-button, input, textarea { font: inherit; }
+button, input, textarea, select { font: inherit; }
 button { cursor: pointer; }
 button:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 button:disabled { opacity: .45; cursor: not-allowed; }
@@ -175,11 +175,15 @@ h2 { margin: 0 0 15px; font-size: 16px; }
 .action-buttons { display: flex; flex-wrap: wrap; justify-content: end; gap: 8px; }
 .detail-status { margin: 12px 0; }
 
-.ticket { margin-bottom: 10px; padding: 15px; border: 1px solid var(--ticket-border); border-radius: 11px; background: var(--ticket); cursor: pointer; transition: background-color .16s ease, border-color .16s ease, transform .16s ease; }
+.ticket-list { display: grid; gap: 10px; padding-top: 14px; }
+.ticket { margin-bottom: 0; padding: 15px; border: 1px solid var(--ticket-border); border-radius: 11px; background: var(--ticket); cursor: pointer; transition: background-color .16s ease, border-color .16s ease, transform .16s ease; }
 .ticket:hover, .ticket.sel { border-color: var(--selection-border); background: var(--ticket-active); }
 .ticket:hover { transform: translateY(-1px); }
 .ticket:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
-.ticket-title { margin: 10px 0; font-weight: 600; }
+.ticket-meta { align-items: flex-start; gap: 12px; }
+.ticket-meta > span:first-child { line-height: 1.45; }
+.ticket-meta .tag { flex-shrink: 0; }
+.ticket-title { margin: 12px 0; font-weight: 600; }
 .tag { padding: 4px 9px; border-radius: 100px; background: var(--tag-surface); font-size: 12px; font-weight: 600; white-space: nowrap; }
 .tag.good { background: var(--good-surface); color: var(--good-text); }
 .tag.done { border: 1px solid var(--done-border); background: var(--done-surface); color: var(--done-text); font-weight: 700; box-shadow: 0 0 0 2px var(--done-halo); }
@@ -192,9 +196,12 @@ button.secondary { background: var(--button-secondary); color: var(--text); }
 button.danger { background: var(--danger); }
 button.complete-button { background: var(--complete-action); }
 button.complete-button:hover { background: var(--complete-hover); }
-input, textarea { width: 100%; padding: 11px; border: 1px solid var(--field-border); border-radius: 9px; background: var(--field); color: var(--field-text); caret-color: var(--focus); }
+input, textarea, select { width: 100%; padding: 11px; border: 1px solid var(--field-border); border-radius: 9px; background: var(--field); color: var(--field-text); caret-color: var(--focus); }
 textarea { min-height: 112px; resize: vertical; }
 textarea.attachment-paths { min-height: 68px; }
+select { cursor: pointer; }
+.file-input { padding: 8px; }
+.file-input::file-selector-button { margin-right: 10px; padding: 7px 10px; border: 0; border-radius: 7px; background: var(--button-secondary); color: var(--text); font: inherit; font-weight: 600; cursor: pointer; }
 label { display: block; margin: 14px 0 7px; color: var(--label); font-size: 13px; }
 .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
 .tabs button { padding: 8px 10px; font-size: 12px; }
@@ -207,12 +214,18 @@ label { display: block; margin: 14px 0 7px; color: var(--label); font-size: 13px
 .break { overflow-wrap: anywhere; }
 .action-message { margin: 10px 0 0; color: var(--good-text); font-size: 13px; }
 .action-message.error { color: var(--bad-text); }
-.run-list { margin: 12px 0; }
+.run-list { display: grid; gap: 10px; margin: 12px 0; }
 .run-ticket { padding: 10px; }
 .execution-panel { min-width: 0; }
-.dialog { width: min(550px, 92vw); padding: 25px; border: 1px solid var(--panel-border); border-radius: 16px; background: var(--panel); color: var(--text); }
+.dialog { width: min(550px, 92vw); max-height: min(90vh, 760px); padding: 25px; overflow: auto; border: 1px solid var(--panel-border); border-radius: 16px; background: var(--panel); color: var(--text); }
 .dialog::backdrop { background: var(--backdrop); }
 .dialog-actions { display: flex; justify-content: end; margin-top: 16px; }
+.dialog-description { margin: 12px 0; font-size: 13px; line-height: 1.5; }
+.attachment-picker { margin-top: 14px; border: 1px solid var(--panel-border); border-radius: 10px; background: var(--ticket); }
+.attachment-picker summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; color: var(--text); font-size: 13px; font-weight: 600; cursor: pointer; }
+.attachment-fields { padding: 0 12px 12px; }
+.attachment-fields label:first-child { margin-top: 3px; }
+.attachment-list { margin-top: 9px; overflow-wrap: anywhere; white-space: pre-line; }
 
 * { scrollbar-color: var(--progress-track) var(--code-surface); scrollbar-width: thin; }
 ::-webkit-scrollbar { width: 9px; height: 9px; }

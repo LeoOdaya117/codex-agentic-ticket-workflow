@@ -76,6 +76,7 @@
                 <h2 id="detail-heading">Ticket details</h2>
                 <div class="action-buttons">
                   <button class="secondary" id="process-button" type="button" hidden>▶ Process ticket</button>
+                  <button class="secondary" id="request-changes-button" type="button" hidden>↺ Request changes</button>
                   <button class="complete-button" id="complete-button" type="button" hidden>✓ Mark Done</button>
                 </div>
               </div>
@@ -111,6 +112,37 @@
       <div class="note">Codex will use your installed $create-ticket skill. This action starts an AI run; it does not edit your application code by design of the skill.</div>
       <div class="dialog-actions">
         <button id="create-ticket-button" type="button">Create with Codex</button>
+      </div>
+    </dialog>
+
+    <dialog id="reject-dialog" class="dialog">
+      <form method="dialog">
+        <div class="line">
+          <h2>Request ticket corrections</h2>
+          <button class="secondary" type="submit" aria-label="Close dialog">✕</button>
+        </div>
+      </form>
+      <p class="muted dialog-description">Describe what is incomplete or needs correction. The feedback will be saved to the ticket and included in the correction run.</p>
+      <label for="rejection-description">What should be corrected?</label>
+      <textarea id="rejection-description" required maxlength="10000" placeholder="Describe the issue, expected result, and steps to reproduce…"></textarea>
+      <details class="attachment-picker">
+        <summary>Attach images or files <span class="muted tiny">Optional</span></summary>
+        <div class="attachment-fields">
+          <label for="rejection-attachment-type">Choose attachment type</label>
+          <select id="rejection-attachment-type">
+            <option value="all">Images and files</option>
+            <option value="images">Images only</option>
+            <option value="files">Documents and files</option>
+          </select>
+          <label for="rejection-attachments">Select evidence</label>
+          <input id="rejection-attachments" class="file-input" type="file" multiple>
+          <div class="muted tiny">Up to 10 files and 20 MB total.</div>
+          <div id="rejection-attachment-list" class="attachment-list muted tiny">No attachments selected.</div>
+        </div>
+      </details>
+      <div id="rejection-message" class="action-message" role="status" aria-live="polite"></div>
+      <div class="dialog-actions">
+        <button id="reject-ticket-button" class="danger" type="button">Reopen &amp; start corrections</button>
       </div>
     </dialog>
 

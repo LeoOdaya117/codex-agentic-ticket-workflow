@@ -78,7 +78,7 @@ function renderTickets() {
     <article class="ticket ${ticket.id === ticketId ? "sel" : ""}"
       data-ticket-id="${escapeHtml(ticket.id)}" role="button" tabindex="0"
       aria-pressed="${ticket.id === ticketId}">
-      <div class="line">
+      <div class="line ticket-meta">
         <span class="tiny muted">${escapeHtml(ticket.id)} · ${escapeHtml(ticket.type)}</span>
         ${badge(ticket.status)}
       </div>
@@ -102,8 +102,11 @@ async function loadDetail(force) {
   const detail = await api(`/api/tickets/${encodeURIComponent(ticketId)}`);
   const isDone = String(detail.summary.status || "").trim().toLowerCase() === "done";
   const needsVerification = String(detail.summary.status || "").trim().toLowerCase() === "ready for human verification";
+  const hasActiveProcess = state.runs.some((run) => run.ticket_id === ticketId
+    && run.mode === "process" && ["launching", "running", "cancelling"].includes(run.status));
   byId("detail-heading").textContent = detail.summary.id;
-  byId("process-button").hidden = isDone;
+  byId("process-button").hidden = isDone || hasActiveProcess;
+  byId("request-changes-button").hidden = !needsVerification;
   byId("complete-button").hidden = !needsVerification;
 
   const keys = [...Object.keys(detail.files), ...detail.reports.map((report) => `agent-reports/${report.name}`)];
@@ -231,6 +234,71 @@ async function completeTicket() {
   }
 }
 
+function showRejection() {
+  byId("rejection-description").value = "";
+  byId("rejection-attachments").value = "";
+  byId("rejection-attachment-list").textContent = "No attachments selected.";
+  byId("rejection-message").textContent = "";
+  byId("rejection-message").className = "action-message";
+  byId("reject-dialog").showModal();
+}
+
+function formatFileSize(size) {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function updateAttachmentFilter() {
+  const input = byId("rejection-attachments");
+  const type = byId("rejection-attachment-type").value;
+  input.accept = type === "images" ? "image/*" : type === "files"
+    ? ".pdf,.md,.txt,.log,.json,.yaml,.yml,.csv,.zip,.doc,.docx,.xls,.xlsx,.ppt,.pptx,text/*,application/*"
+    : "";
+}
+
+function updateAttachmentList() {
+  const files = [...byId("rejection-attachments").files];
+  byId("rejection-attachment-list").textContent = files.length
+    ? files.map((file) => `${file.name} · ${formatFileSize(file.size)}`).join("\n")
+    : "No attachments selected.";
+}
+
+async function rejectTicket() {
+  const description = byId("rejection-description").value.trim();
+  if (!description) {
+    byId("rejection-message").className = "action-message error";
+    byId("rejection-message").textContent = "Describe what needs correction before reopening the ticket.";
+    byId("rejection-description").focus();
+    return;
+  }
+  if (!ticketId || !confirm(`Reject ${ticketId} and reopen it for corrections? This will save your feedback and start a Codex correction run.`)) return;
+
+  const button = byId("reject-ticket-button");
+  const message = byId("rejection-message");
+  button.disabled = true;
+  button.textContent = "Reopening ticket…";
+  message.className = "action-message";
+  message.textContent = "Saving feedback and attachments…";
+  try {
+    const form = new FormData();
+    form.append("description", description);
+    for (const file of byId("rejection-attachments").files) form.append("attachments", file, file.name);
+    const result = await api(`/api/tickets/${encodeURIComponent(ticketId)}/reject`, { method: "POST", body: form });
+    if (result.run_id) runId = result.run_id;
+    byId("reject-dialog").close();
+    await refresh();
+    byId("action-message").className = "action-message";
+    byId("action-message").textContent = result.message;
+  } catch (error) {
+    message.className = "action-message error";
+    message.textContent = error.message;
+  } finally {
+    button.disabled = false;
+    button.textContent = "Reopen & start corrections";
+  }
+}
+
 async function stopRun() {
   if (!confirm("Request termination of this Codex run?")) return;
   try {
@@ -247,7 +315,11 @@ byId("create-open-button").addEventListener("click", showCreate);
 byId("create-ticket-button").addEventListener("click", createTicket);
 byId("process-button").addEventListener("click", runTicket);
 byId("complete-button").addEventListener("click", completeTicket);
+byId("request-changes-button").addEventListener("click", showRejection);
+byId("reject-ticket-button").addEventListener("click", rejectTicket);
 byId("stop-button").addEventListener("click", stopRun);
+byId("rejection-attachment-type").addEventListener("change", updateAttachmentFilter);
+byId("rejection-attachments").addEventListener("change", updateAttachmentList);
 
 byId("tickets").addEventListener("click", (event) => {
   const card = event.target.closest("[data-ticket-id]");
