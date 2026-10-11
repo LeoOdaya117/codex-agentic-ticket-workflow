@@ -209,6 +209,7 @@ h2 { margin: 0 0 15px; font-size: 16px; }
 .line h2 { margin: 0; }
 .action-buttons { display: flex; flex-wrap: wrap; justify-content: end; gap: 8px; }
 .detail-status { margin: 12px 0; }
+.detail-pr { margin: 0 0 14px; font-size: 13px; }
 
 .ticket-list { display: grid; gap: 10px; padding-top: 14px; }
 .ticket { margin-bottom: 0; padding: 15px; border: 1px solid var(--ticket-border); border-radius: 11px; background: var(--ticket); cursor: pointer; transition: background-color .16s ease, border-color .16s ease, transform .16s ease, box-shadow .16s ease; }

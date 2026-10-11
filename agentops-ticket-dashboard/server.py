@@ -69,6 +69,98 @@ def find_ticket_dir(repo, ticket_id):
         if p.is_dir() and p.resolve().is_relative_to(repo.resolve()): return p
     return None
 
+def _git(repo, *args, check=True):
+    try:
+        result=subprocess.run(['git','-C',str(repo),*map(str,args)],capture_output=True,
+                              text=True,encoding='utf-8',errors='replace',timeout=30)
+    except FileNotFoundError as exc:
+        raise RuntimeError('Git is required to process tickets in isolated worktrees') from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError('Git timed out while preparing the ticket worktree') from exc
+    if check and result.returncode:
+        detail=(result.stderr or result.stdout or 'unknown Git error').strip()
+        raise RuntimeError(f"Git {' '.join(map(str,args))} failed: {detail[:1200]}")
+    return result
+
+def acquire_process_lock(path):
+    """Hold an OS-level lock so separate dashboard instances cannot run one ticket twice."""
+    path=Path(path)
+    path.parent.mkdir(parents=True,exist_ok=True)
+    stream=path.open('a+b')
+    try:
+        if os.name=='nt':
+            import msvcrt
+            stream.seek(0,os.SEEK_END)
+            if stream.tell()==0:
+                stream.write(b'0');stream.flush()
+            stream.seek(0)
+            msvcrt.locking(stream.fileno(),msvcrt.LK_NBLCK,1)
+        else:
+            import fcntl
+            fcntl.flock(stream.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+        return stream
+    except (OSError,BlockingIOError) as exc:
+        stream.close()
+        raise ValueError('A processing run is already active for this ticket') from exc
+
+def release_process_lock(stream):
+    if not stream:return
+    try:
+        if os.name=='nt':
+            import msvcrt
+            stream.seek(0)
+            msvcrt.locking(stream.fileno(),msvcrt.LK_UNLCK,1)
+        else:
+            import fcntl
+            fcntl.flock(stream.fileno(),fcntl.LOCK_UN)
+    except OSError:
+        pass
+    finally:
+        stream.close()
+
+def ensure_ticket_worktree(repo, ticket_id):
+    """Create or resume the persistent branch and worktree assigned to one ticket."""
+    if not ID_RE.fullmatch(ticket_id): raise ValueError('Invalid ticket ID')
+    result=_git(repo,'rev-parse','--show-toplevel')
+    root=Path(result.stdout.strip()).resolve()
+    base_commit=_git(root,'rev-parse','HEAD').stdout.strip()
+    branch=f'codex/{ticket_id}'
+    worktree_parent=root.parent/f'{root.name}-ticket-worktrees'
+    worktree=worktree_parent/ticket_id
+    lock_path=worktree_parent/'.locks'/f'{ticket_id}.lock'
+    records=[]
+    for block in _git(root,'worktree','list','--porcelain').stdout.split('\n\n'):
+        entry={}
+        for line in block.splitlines():
+            key,_,value=line.partition(' ')
+            if key in ('worktree','branch'): entry[key]=value
+        if entry.get('worktree'): records.append(entry)
+    branch_ref=f'refs/heads/{branch}'
+    attached=next((entry for entry in records if entry.get('branch')==branch_ref),None)
+    def same_path(left,right):
+        return os.path.normcase(os.path.abspath(str(left)))==os.path.normcase(os.path.abspath(str(right)))
+    if attached:
+        if not same_path(attached['worktree'],worktree):
+            raise RuntimeError(f"Branch {branch} is already checked out at {attached['worktree']}")
+        if not worktree.is_dir():
+            raise RuntimeError(f"Git still records {branch} at a missing worktree path: {worktree}")
+        worktree_commit=_git(worktree,'rev-parse','HEAD').stdout.strip()
+        return {'root':root,'path':worktree.resolve(),'branch':branch,'base_commit':base_commit,'lock_path':lock_path,
+                'head_commit':worktree_commit,'resumed':True}
+    if worktree.exists():
+        raise RuntimeError(f'Ticket worktree path already exists but is not registered with Git: {worktree}')
+    worktree_parent.mkdir(parents=True,exist_ok=True)
+    branch_exists=_git(root,'show-ref','--verify','--quiet',branch_ref,check=False).returncode==0
+    if branch_exists:
+        _git(root,'worktree','add',str(worktree),branch)
+    elif _git(root,'show-ref','--verify','--quiet',f'refs/remotes/origin/{branch}',check=False).returncode==0:
+        _git(root,'worktree','add','-b',branch,str(worktree),f'origin/{branch}')
+    else:
+        _git(root,'worktree','add','-b',branch,str(worktree),'HEAD')
+    head_commit=_git(worktree,'rev-parse','HEAD').stdout.strip()
+    return {'root':root,'path':worktree.resolve(),'branch':branch,'base_commit':base_commit,'lock_path':lock_path,
+            'head_commit':head_commit,'resumed':False}
+
 def local_request_allowed(headers, port):
     host = urlparse('//' + headers.get('Host', '')).hostname
     if host not in ('127.0.0.1', 'localhost'):
@@ -91,6 +183,7 @@ def summary(p):
     return {'id':p.name,'title':title,'status':state.get('status') or field('Status') or 'Open',
        'priority':field('Priority') or state.get('priority','Unspecified'),
        'type':field('Type') or state.get('type','Task'),
+       'pull_request':field('Pull request'),
        'updated':max((f.stat().st_mtime for f in p.iterdir() if f.is_file()),default=0),
        'checked':sum(bool(re.match(r'^\s*- \[x\]',x,re.I)) for x in md.splitlines()),
        'total':sum(bool(re.match(r'^\s*- \[[ x]\]',x,re.I)) for x in md.splitlines())}
@@ -280,12 +373,37 @@ def stage_create_uploads(repo, uploads):
 def spawn_codex(repo, ticket_id, mode, description='', attachments=None, repo_id=None, uploads=None):
     if not shutil.which('codex') and not shutil.which('codex.cmd'): raise RuntimeError('Codex CLI not found on PATH. Install and sign in first.')
     staging=None
+    run_id=uuid.uuid4().hex[:12]
+    process_worktree=None
+    ticket_dir=None
+    process_lock_handle=None
     if mode=='process':
-        if not find_ticket_dir(repo,ticket_id): raise ValueError('Ticket not found')
+        ticket_dir=find_ticket_dir(repo,ticket_id)
+        if not ticket_dir: raise ValueError('Ticket not found')
+        ticket_dir=ticket_dir.resolve()
+        with LOCK:
+            selected_id=repo_id or repository_id(repo)
+            if any(run.get('repo_id')==selected_id and run.get('ticket_id')==ticket_id
+                   and run.get('mode')=='process' and run.get('status') in ('launching','running','cancelling')
+                   for run in RUNS.values()):
+                raise ValueError(f'A processing run is already active for {ticket_id}')
+            process_worktree=ensure_ticket_worktree(repo,ticket_id)
+            process_lock_handle=acquire_process_lock(process_worktree['lock_path'])
+            RUNS[run_id]={'id':run_id,'repo_id':selected_id,'ticket_id':ticket_id,'mode':'process',
+                          'status':'launching','started':now(),'ended':None,'exit_code':None,'events':[],
+                          'pid':None,'process':None,'worktree':str(process_worktree['path']),
+                          'branch':process_worktree['branch']}
         prompt=(f'Use the installed $process-ticket workflow for {ticket_id}. Read repository AGENTS.md and applicable skill instructions. '
+                f"The dashboard assigned branch {process_worktree['branch']} in the isolated worktree {process_worktree['path']}. "
+                f"The ticket branch currently starts at {process_worktree['head_commit']}; the configured checkout HEAD is {process_worktree['base_commit']}. "
+                f'Keep all code edits, tests, and Git operations in that worktree. '
+                f'Canonical ticket records and attachments are in {ticket_dir}; use this absolute directory for all ticket files and pass '
+                f'--ticket-dir "{ticket_dir}" to ticket.py show, check, and set-status commands. '
                 'If verification.md contains a Human rejection entry, read its feedback and every referenced attachment before planning corrections. '
                 'Investigate and reproduce if possible, plan, delegate via available registered agents, implement, review and QA, '
-                'record truthful evidence in ticket files. Stop at human verification; do not merge or deploy. '
+                'record truthful evidence in ticket files. After QA passes, commit the ticket changes, push the assigned branch, and create or update its pull request. '
+                'Record branch, worktree, commit SHA, and pull request URL in ticket.md and the QA report before setting Ready for Human Verification. '
+                'Leave the pull request open for human testing; never merge, deploy, or close it. '
                 'Do not claim test success unless commands actually passed.')
     else:
         if not description.strip():raise ValueError('Description is required')
@@ -294,13 +412,17 @@ def spawn_codex(repo, ticket_id, mode, description='', attachments=None, repo_id
         prompt=(f'Use the installed $create-ticket skill. Create a structured ticket from this report and any existing referenced local evidence. '
                 f'Do not implement.\n\nIssue description:\n{description[:10000]}\n\nAttachment paths (only inspect if present):\n{attachment_lines}')
     exe=shutil.which('codex') or shutil.which('codex.cmd')
-    args=[exe,'exec','--json','--sandbox','workspace-write',prompt]
-    run_id=uuid.uuid4().hex[:12]
-    with LOCK:
-        RUNS[run_id]={'id':run_id,'repo_id':repo_id or repository_id(repo),'ticket_id':ticket_id if mode=='process' else None,'mode':mode,'status':'launching','started':now(),'ended':None,'exit_code':None,'events':[],'pid':None,'process':None}
+    args=[exe,'exec','--json','--sandbox','workspace-write']
+    if process_worktree:
+        args.extend(['--add-dir',str(ticket_dir)])
+    args.append(prompt)
+    if mode!='process':
+      with LOCK:
+        RUNS[run_id]={'id':run_id,'repo_id':repo_id or repository_id(repo),'ticket_id':ticket_id if mode=='process' else None,'mode':mode,'status':'launching','started':now(),'ended':None,'exit_code':None,'events':[],'pid':None,'process':None,
+                      'worktree':None,'branch':None}
     def worker():
         try:
-            opts={'cwd':str(repo),'stdout':subprocess.PIPE,'stderr':subprocess.PIPE,'text':True,'encoding':'utf-8','errors':'replace','bufsize':1}
+            opts={'cwd':str(process_worktree['path'] if process_worktree else repo),'stdout':subprocess.PIPE,'stderr':subprocess.PIPE,'text':True,'encoding':'utf-8','errors':'replace','bufsize':1}
             if os.name=='nt':opts['creationflags']=subprocess.CREATE_NO_WINDOW
             proc=subprocess.Popen(args,**opts)
             update(run_id,status='running',pid=proc.pid,process=proc)
@@ -323,8 +445,13 @@ def spawn_codex(repo, ticket_id, mode, description='', attachments=None, repo_id
             log_event(run_id,{'kind':'error','message':str(exc)})
             update(run_id,status='failed',ended=now(),process=None)
         finally:
+            release_process_lock(process_lock_handle)
             if staging: shutil.rmtree(staging,ignore_errors=True)
-    threading.Thread(target=worker,daemon=True).start()
+    try:
+        threading.Thread(target=worker,daemon=True).start()
+    except Exception:
+        release_process_lock(process_lock_handle)
+        raise
     return run_id
 
 class Handler(BaseHTTPRequestHandler):

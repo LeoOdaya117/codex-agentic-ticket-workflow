@@ -23,6 +23,7 @@ A portable, local-first ticket workflow for Codex. Install it into an existing p
 ## Requirements
 
 - Python 3.9 or newer for the installer and ticket helper scripts.
+- Git installed in target projects for ticket-specific worktrees, commits, and branches.
 - Codex CLI installed and signed in to create or process tickets. The kit does not need an API key or hosted service.
 - The optional dashboard also requires Codex CLI on `PATH`; see its [README](agentops-ticket-dashboard/README.md) for platform-specific setup.
 
@@ -45,9 +46,11 @@ The installer skips existing files and does not replace `.codex/config.toml`. If
 1. After installation, run `$project-init` in the target project to record verified architecture, conventions, and test commands in `.codex/knowledge/`. Refresh these notes as the project changes.
 2. Before processing a ticket, run `$discover-team` and inspect the generated inventory and routing suggestions. Existing project agents take precedence; bundled role prompts are fallbacks.
 3. Run `$create-ticket <description>` to document a request. Ticket creation records the request and does not implement it.
-4. Only after explicitly authorizing implementation, run `$process-ticket TKT-0001`. It investigates, plans, implements, reviews, and runs QA, then stops at `Ready for Human Verification`.
+4. Only after explicitly authorizing implementation, run `$process-ticket TKT-0001` in a Codex worktree, or start it from the dashboard, which creates the ticket worktree for you. Each ticket uses its own branch and Git worktree, then is reviewed, QA-tested, committed, pushed, and opened as a pull request. The workflow stops at `Ready for Human Verification` with the PR open for your test and merge decision.
 5. Keep acceptance checkboxes in `tickets/TKT-XXXX/ticket.md` current only when each criterion has supporting implementation and evidence. Leave incomplete or unverified criteria unchecked.
-6. Personally verify the result, then use `$verify-ticket TKT-0001` with an explicit approval or rejection. `Done` requires human approval and does not authorize merging or deployment.
+6. Test the open PR yourself, then use `$verify-ticket TKT-0001` with an explicit approval or rejection. `Done` records your acceptance; it does not merge the PR or authorize deployment.
+
+The optional dashboard creates and reuses one worktree at `<repository-parent>/<repository-name>-ticket-worktrees/TKT-XXXX` per processed ticket. Different tickets can run at the same time on separate branches and worktrees. Corrections after rejection continue on the same ticket branch and update its existing PR. Worktrees remain available for human testing and are not removed by the dashboard.
 
 Generated ticket records are ignored by default because they can contain private reports or attachments.
 

@@ -9,14 +9,16 @@ A **standalone, dependency-free local monitoring and launch UI** for the existin
 - Counts tickets in Investigating, Planning, Implementing, Code Review, or QA Testing as active, including workflows started outside the dashboard.
 - Creates tickets by invoking the existing `$create-ticket` skill via Codex.
 - Processes tickets by invoking the existing `$process-ticket` skill via Codex.
+- Runs each ticket on its own persistent Git branch and worktree so different tickets can be processed at the same time. Correction runs reuse the same worktree and pull request.
 - Records human verification approval or rejection. Rejections save feedback and optional evidence, reopen the ticket, and start a correction run.
-- Tracks active Codex runs internally to prevent launching a duplicate process for the same ticket. Does not automatically merge, deploy, or approve anything.
+- Prevents two dashboard instances from processing the same ticket at once. Does not automatically merge, deploy, or approve anything.
 - Connects multiple repository folders in one dashboard, with a folder switcher and a local folder picker.
 
 ## Requirements
 
 - Windows, macOS, or Linux; Python **3.9+** (3.9 is sufficient for this dashboard).
 - Codex CLI on PATH and already authenticated (`codex login status`).
+- Git installed and the selected target repository initialized as a Git repository. The Codex CLI must support `exec --add-dir` so the isolated run can update the ticket's ignored records.
 - Your existing repository with installed `$create-ticket` and `$process-ticket` skills. This UI **does not replace or modify those skills**.
 - Run on your own machine; the HTTP server binds to `127.0.0.1`, not your LAN.
 
@@ -59,22 +61,27 @@ Browser localhost:8765
     | HTTP fetch every 2 seconds
 Local Python server
     |-- reads tickets/, .codex/tickets/, Markdown/JSON
-    |-- launches codex exec --json --sandbox workspace-write
+    |-- creates or reuses one Git branch/worktree per processed ticket
+    |-- launches codex exec --json --sandbox workspace-write --add-dir <ticket-directory>
     `-- streams JSON lines into in-memory run history
 Existing Codex skills + registered specialist agents
+    `-- commit, push and open/update a PR for human testing
 ```
 
-**Ticket files remain the source of truth.** “Active tickets” is inferred from the ticket status saved in `state.json`; it indicates workflow phase, not a confirmed live process. Acceptance criteria progress counts checked boxes in `ticket.md` and only changes when the ticket workflow records those checks. The dashboard does not display live Codex run events. Run history and process tracking are held in memory and reset when the dashboard stops.
+**Ticket files remain the source of truth.** “Active tickets” is inferred from the ticket status saved in `state.json`; it indicates workflow phase, not a confirmed live process. Acceptance criteria progress counts checked boxes in `ticket.md` and only changes when the ticket workflow records those checks. The dashboard does not display live Codex run events. Run history is held in memory and resets when the dashboard stops; the operating-system ticket lock and Git worktrees remain on disk.
+
+Processing a ticket creates `<repository-parent>/<repository-name>-ticket-worktrees/<TICKET-ID>` on branch `codex/<TICKET-ID>`. The ignored ticket directory stays in the configured repository and is granted to that run as an additional writable directory. The worktree is kept after the Codex process exits so the PR can be tested and the same branch can be reused after rejection. The dashboard never removes ticket worktrees or merges PRs.
 
 ## Important operational notes
 
-1. Start only **one processing run per ticket**. The dashboard currently does not enforce this at the OS/file level; parallel runs on the same ticket can conflict.
-2. A successful Codex process exit is **not** proof that your QA tests passed. Inspect `qa-report.md`, check results, and perform human verification.
-3. Run sessions and event history are **in memory**; they reset when this dashboard stops. Ticket files persist.
+1. Different tickets can run concurrently because each receives its own branch and worktree. Only one processing run per ticket can hold its OS-level lock at a time.
+2. A successful Codex process exit is **not** proof that QA passed or that a PR was created. Inspect `qa-report.md`, the commit, and the open PR, then test it yourself.
+3. Run sessions and event history are **in memory**; they reset when this dashboard stops. Ticket files, locks, branches, and worktrees persist.
 4. Ticket creation accepts **dragged or browsed file uploads** (up to 10 files and 20 MB total), which are staged inside the selected workspace for the Codex run and removed when it exits. The `$create-ticket` skill copies permitted evidence into the ticket's `attachments/` directory. Local paths remain available as an alternative. Human rejection can upload up to 10 image or file attachments (20 MB total); these are saved under the ticket's `attachments/` directory and referenced from `verification.md`.
 5. The dashboard does not expose authorization controls; **do not expose its port publicly**. Treat anyone with local access to the dashboard as able to trigger Codex operations in the selected repo.
-6. Codex sandbox and approval behavior depend on your local installation and configuration. The dashboard selects `workspace-write` mode, and intentionally does not use dangerous full-access flags.
-7. On some Windows systems, `codex` is installed as `codex.cmd`, which is used automatically if present on PATH. If launching fails, try invoking the CLI directly and ensure your PATH is correct.
+6. Codex sandbox and approval behavior depend on your local installation and configuration. The dashboard selects `workspace-write` mode and grants write access to the ticket's record directory, and intentionally does not use dangerous full-access flags.
+7. Worktrees remain after a ticket is accepted or its PR is merged. Once you no longer need a worktree, remove it explicitly with `git worktree remove "<worktree-path>"`; delete the local branch only after confirming it is no longer needed.
+8. On some Windows systems, `codex` is installed as `codex.cmd`, which is used automatically if present on PATH. If launching fails, try invoking the CLI directly and ensure your PATH is correct.
 
 ## Compatibility
 

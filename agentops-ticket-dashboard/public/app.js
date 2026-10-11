@@ -260,11 +260,15 @@ async function loadDetail(force, focusQa = false) {
   const content = detail.files[selectedTab]
     ?? detail.reports.find((report) => `agent-reports/${report.name}` === selectedTab)?.content
     ?? "";
+  const pullRequest = /^https:\/\//i.test(String(detail.summary.pull_request || ""))
+    ? `<p class="detail-pr"><a href="${escapeHtml(detail.summary.pull_request)}" target="_blank" rel="noopener noreferrer">Open pull request for human testing ↗</a></p>`
+    : "";
   const html = `
     <div class="break">
       <b>${escapeHtml(detail.summary.title)}</b>
       <div class="detail-status">${badge(detail.summary.status)} &nbsp; <span class="muted tiny">${escapeHtml(detail.summary.priority)}</span></div>
     </div>
+    ${pullRequest}
     <div class="tabs">${keys.map((key) => `
       <button class="${key === selectedTab ? "" : "secondary"}" data-tab="${escapeHtml(key)}" type="button">${escapeHtml(key)}</button>`).join("")}
     </div>
@@ -434,7 +438,7 @@ async function runTicket() {
 }
 
 async function completeTicket() {
-  if (!ticketId || !confirm(`Mark ${ticketId} as Done? This records your explicit human approval.`)) return;
+  if (!ticketId || !confirm(`Approve ${ticketId} after testing its pull request? This records your acceptance and leaves the PR open for your merge decision.`)) return;
   const button = byId("complete-button");
   const message = byId("action-message");
   button.disabled = true;
@@ -450,7 +454,7 @@ async function completeTicket() {
     message.textContent = error.message;
   } finally {
     button.disabled = false;
-    button.textContent = "✓ Mark Done";
+    button.textContent = "✓ Approve after test";
   }
 }
 
