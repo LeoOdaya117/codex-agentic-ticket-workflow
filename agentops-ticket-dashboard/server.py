@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """Local-only Codex ticket dashboard; Python standard library."""
-import argparse, json, os, re, subprocess, threading, time, uuid, shutil, sys
+import argparse, hashlib, json, os, re, subprocess, threading, time, uuid, shutil, sys
 from datetime import datetime, timezone
 from pathlib import Path
 from email.parser import BytesParser
 from email.policy import default as email_policy
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, parse_qs
 
 ROOT = Path(__file__).resolve().parent
 LOCK = threading.RLock()
 RUNS = {}
+REPOSITORIES = {}
+DEFAULT_REPO_ID = None
 MAX_EVENTS = 2500
 ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$')
 ACTIVE_TICKET_STATUSES = {'investigating', 'planning', 'implementing', 'code review', 'qa testing'}
@@ -23,6 +25,40 @@ MAX_FEEDBACK_UPLOAD = 20 * 1024 * 1024
 MAX_FEEDBACK_FILES = 10
 
 def now(): return datetime.now(timezone.utc).isoformat()
+def repository_id(repo):
+    return hashlib.sha256(str(repo.resolve()).casefold().encode('utf-8')).hexdigest()[:12]
+
+def add_repository(path):
+    if not str(path or '').strip(): raise ValueError('Enter a repository folder path')
+    repo=Path(path).expanduser().resolve()
+    if not repo.is_dir(): raise ValueError('Folder does not exist or is not accessible')
+    identifier=repository_id(repo)
+    with LOCK: REPOSITORIES[identifier]=repo
+    return {'id':identifier,'path':str(repo),'name':repo.name or str(repo)}
+
+def selected_repository(handler):
+    requested=parse_qs(urlparse(handler.path).query).get('repo',[DEFAULT_REPO_ID])[0]
+    with LOCK: repo=REPOSITORIES.get(requested)
+    if repo is None: raise ValueError('Select a configured repository')
+    return repo,requested
+
+def runs_for_repository(selected_id):
+    with LOCK:
+        return [{k:v for k,v in run.items() if k not in ('events','process')}
+                for run in RUNS.values() if run.get('repo_id')==selected_id]
+
+def choose_repository_folder():
+    """Open a native folder chooser when Tk is available; callers may use path entry otherwise."""
+    picker=("import tkinter as tk; from tkinter import filedialog; "
+            "root=tk.Tk(); root.withdraw(); root.attributes('-topmost',True); "
+            "print(filedialog.askdirectory(title='Add a repository folder',mustexist=True)); root.destroy()")
+    options={'capture_output':True,'text':True,'encoding':'utf-8','errors':'replace','timeout':300}
+    if os.name=='nt': options['creationflags']=getattr(subprocess,'CREATE_NO_WINDOW',0)
+    try: result=subprocess.run([sys.executable,'-c',picker],**options)
+    except subprocess.TimeoutExpired as exc: raise RuntimeError('Folder picker timed out') from exc
+    if result.returncode: raise RuntimeError((result.stderr or 'Folder picker could not start').strip()[:500])
+    return result.stdout.strip()
+
 def read_text(p, limit=200000):
     try: return p.read_text(encoding='utf-8', errors='replace')[:limit]
     except OSError: return ''
@@ -206,7 +242,7 @@ def log_event(run_id, data):
         run['events'].append({'time':now(),**data})
         if len(run['events'])>MAX_EVENTS:run['events']=run['events'][-MAX_EVENTS:]
 
-def spawn_codex(repo, ticket_id, mode, description='', attachments=None):
+def spawn_codex(repo, ticket_id, mode, description='', attachments=None, repo_id=None):
     if not shutil.which('codex') and not shutil.which('codex.cmd'): raise RuntimeError('Codex CLI not found on PATH. Install and sign in first.')
     if mode=='process':
         if not find_ticket_dir(repo,ticket_id): raise ValueError('Ticket not found')
@@ -224,7 +260,7 @@ def spawn_codex(repo, ticket_id, mode, description='', attachments=None):
     args=[exe,'exec','--json','--sandbox','workspace-write',prompt]
     run_id=uuid.uuid4().hex[:12]
     with LOCK:
-        RUNS[run_id]={'id':run_id,'ticket_id':ticket_id if mode=='process' else None,'mode':mode,'status':'launching','started':now(),'ended':None,'exit_code':None,'events':[],'pid':None,'process':None}
+        RUNS[run_id]={'id':run_id,'repo_id':repo_id or repository_id(repo),'ticket_id':ticket_id if mode=='process' else None,'mode':mode,'status':'launching','started':now(),'ended':None,'exit_code':None,'events':[],'pid':None,'process':None}
     def worker():
         try:
             opts={'cwd':str(repo),'stdout':subprocess.PIPE,'stderr':subprocess.PIPE,'text':True,'encoding':'utf-8','errors':'replace','bufsize':1}
@@ -284,18 +320,32 @@ class Handler(BaseHTTPRequestHandler):
         if not local_request_allowed(self.headers, self.server.server_port):
             return self.respond(403, {'error':'Local requests only'})
         path=unquote(urlparse(self.path).path)
+        if path=='/api/repos':
+            with LOCK:
+                repos=[{'id':key,'path':str(value),'name':value.name or str(value)} for key,value in REPOSITORIES.items()]
+                requested=parse_qs(urlparse(self.path).query).get('repo',[DEFAULT_REPO_ID])[0]
+                selected=requested if requested in REPOSITORIES else DEFAULT_REPO_ID
+            return self.respond(200,{'repos':repos,'selected':selected})
+        if path=='/api/browse':
+            try:
+                folder=choose_repository_folder()
+                return self.respond(200,{'path':folder})
+            except Exception as exc:
+                return self.respond(501,{'error':f'Native folder picker is unavailable ({exc}). Enter the folder path instead.'})
+        try: repo,selected_id=selected_repository(self)
+        except ValueError as exc: return self.respond(400,{'error':str(exc)})
         if path=='/api/overview':
-            with LOCK: r=[{k:v for k,v in x.items() if k not in ('events','process')} for x in RUNS.values()]
-            ticket_summaries=tickets(self.repo)
-            return self.respond(200,{'repo':str(self.repo),'tickets':ticket_summaries,'active_tickets':active_ticket_count(ticket_summaries),'runs':r})
+            r=runs_for_repository(selected_id)
+            ticket_summaries=tickets(repo)
+            return self.respond(200,{'repo':str(repo),'repo_id':selected_id,'tickets':ticket_summaries,'active_tickets':active_ticket_count(ticket_summaries),'runs':r})
         if path.startswith('/api/tickets/'):
-            tid=path.split('/')[-1];d=detail(self.repo,tid)
+            tid=path.split('/')[-1];d=detail(repo,tid)
             return self.respond(200,d) if d else self.respond(404,{'error':'Ticket not found'})
         if path.startswith('/api/runs/'):
             rid=path.split('/')[-1]
             with LOCK:
                 r=RUNS.get(rid)
-                data={k:v for k,v in r.items() if k!='process'} if r else None
+                data={k:v for k,v in r.items() if k!='process'} if r and r.get('repo_id')==selected_id else None
             return self.respond(200,data) if data else self.respond(404,{'error':'Run not found'})
         if path=='/' or path=='/index.html':
             p=ROOT/'public'/'index.html';b=p.read_bytes();self.send_response(200);self.send_header('Content-Type','text/html; charset=utf-8');self.send_header('Cache-Control','no-store');self.send_header('Content-Length',str(len(b)));self.end_headers();return self.wfile.write(b)
@@ -307,15 +357,22 @@ class Handler(BaseHTTPRequestHandler):
         if not local_request_allowed(self.headers, self.server.server_port):
             return self.respond(403, {'error':'Local requests only'})
         path=urlparse(self.path).path
+        if path=='/api/repos':
+            try:
+                data=self.body();item=add_repository(str(data.get('path','')).strip())
+                return self.respond(201,item)
+            except (ValueError,TypeError,OSError) as exc:return self.respond(400,{'error':str(exc)})
+        try: repo,selected_id=selected_repository(self)
+        except ValueError as exc: return self.respond(400,{'error':str(exc)})
         if path.startswith('/api/tickets/') and path.endswith('/reject'):
             if not self.headers.get('Content-Type','').lower().startswith('multipart/form-data'):
                 return self.respond(415, {'error':'Content-Type must be multipart/form-data'})
             try:
                 fields,uploads=self.multipart()
                 tid=unquote(path[len('/api/tickets/'):-len('/reject')].strip('/'))
-                result=reject_ticket(self.repo,tid,fields.get('description',''),uploads)
+                result=reject_ticket(repo,tid,fields.get('description',''),uploads)
                 try:
-                    result['run_id']=spawn_codex(self.repo,tid,'process')
+                    result['run_id']=spawn_codex(repo,tid,'process',repo_id=selected_id)
                     result['message']+=f" · Correction run {result['run_id']} started."
                 except (RuntimeError,ValueError) as exc:
                     result['run_id']=None
@@ -330,15 +387,16 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/run':
                 mode=data.get('mode');tid=str(data.get('ticket_id',''))
                 if mode not in ('create','process'):raise ValueError('Invalid mode')
-                rid=spawn_codex(self.repo,tid,mode,str(data.get('description','')),data.get('attachments',[]))
+                rid=spawn_codex(repo,tid,mode,str(data.get('description','')),data.get('attachments',[]),repo_id=selected_id)
                 return self.respond(202,{'run_id':rid})
             if path.startswith('/api/tickets/') and path.endswith('/complete'):
                 tid=unquote(path[len('/api/tickets/'):-len('/complete')].strip('/'))
-                return self.respond(200,complete_ticket(self.repo,tid))
+                return self.respond(200,complete_ticket(repo,tid))
             if path.startswith('/api/stop/'):
                 rid=path.split('/')[-1]
                 with LOCK:
                     run=RUNS.get(rid)
+                    if run and run.get('repo_id')!=selected_id: run=None
                     proc=run.get('process') if run else None
                     if proc and proc.poll() is None: run['status']='cancelling'
                 if not proc or proc.poll() is not None:raise ValueError('Run is not active')
@@ -352,13 +410,16 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     ap=argparse.ArgumentParser(description='Local Codex ticket dashboard')
-    ap.add_argument('--repo',required=True,help='Existing repository with installed ticket workflow')
+    ap.add_argument('--repo',action='append',required=True,help='Repository folder (repeat to connect multiple repositories)')
     ap.add_argument('--port',type=int,default=8765)
-    args=ap.parse_args();repo=Path(args.repo).expanduser().resolve()
-    if not repo.is_dir():ap.error('Repository directory does not exist')
-    Handler.repo=repo
+    args=ap.parse_args()
+    try:
+        for path in args.repo: add_repository(path)
+    except ValueError as exc: ap.error(str(exc))
+    global DEFAULT_REPO_ID
+    DEFAULT_REPO_ID=next(iter(REPOSITORIES))
     server=ThreadingHTTPServer(('127.0.0.1',args.port),Handler)
-    print(f'Dashboard: http://127.0.0.1:{args.port}\nRepository: {repo}\nLocal only. Ctrl+C to stop.',flush=True)
+    print(f'Dashboard: http://127.0.0.1:{args.port}\nRepositories: {len(REPOSITORIES)}\nLocal only. Ctrl+C to stop.',flush=True)
     try:server.serve_forever()
     except KeyboardInterrupt: pass
     finally:server.server_close()

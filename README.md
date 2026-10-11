@@ -59,13 +59,15 @@ Start the dashboard for a target project with:
 .\agentops-ticket-dashboard\start.ps1 -Repo "D:\Projects\my-project"
 ```
 
+Connect several repositories to the same dashboard with `-Repo "D:\Projects\one","D:\Projects\two"`, or use the dashboard’s **+** folder button while it is running.
+
 Or run the Python server directly:
 
 ```text
-python agentops-ticket-dashboard/server.py --repo "D:\Projects\my-project" --port 8765
+python agentops-ticket-dashboard/server.py --repo "D:\Projects\my-project" --repo "D:\Projects\another-project" --port 8765
 ```
 
-Open <http://127.0.0.1:8765>. Ticket status and acceptance progress come from saved files. The active-ticket count is status-based; the execution monitor only shows runs started through the dashboard. See `agentops-ticket-dashboard/README.md`.
+Open <http://127.0.0.1:8765>. Ticket status and acceptance progress come from saved files. The active-ticket count is status-based. See `agentops-ticket-dashboard/README.md`.
 
 ## Tests
 

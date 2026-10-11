@@ -10,8 +10,8 @@ A **standalone, dependency-free local monitoring and launch UI** for the existin
 - Creates tickets by invoking the existing `$create-ticket` skill via Codex.
 - Processes tickets by invoking the existing `$process-ticket` skill via Codex.
 - Records human verification approval or rejection. Rejections save feedback and optional evidence, reopen the ticket, and start a correction run.
-- Shows live-ish Codex `exec --json` events from runs **started through this dashboard**, polled every 2 seconds.
-- Requests cancellation of a run. Does not automatically merge, deploy, or approve anything.
+- Tracks active Codex runs internally to prevent launching a duplicate process for the same ticket. Does not automatically merge, deploy, or approve anything.
+- Connects multiple repository folders in one dashboard, with a folder switcher and a local folder picker.
 
 ## Requirements
 
@@ -24,12 +24,13 @@ A **standalone, dependency-free local monitoring and launch UI** for the existin
 
 ```powershell
 cd D:\Tools\codex-ticket-dashboard
-python server.py --repo "D:\Projects\fieldOps" --port 8765
+python server.py --repo "D:\Projects\fieldOps" --repo "D:\Projects\roadTrip" --port 8765
 ```
 
 Visit **http://127.0.0.1:8765**.
 
-Alternatively run `start.ps1 -Repo "D:\Projects\fieldOps"`.
+Alternatively run `start.ps1 -Repo "D:\Projects\fieldOps","D:\Projects\roadTrip"`.
+Use the **+** beside Connected folders to browse for and connect another folder while the dashboard is running. The server is local-only; folder additions made with the picker last until the server stops. To reconnect those folders at the next start, pass each one with another `--repo` (or `-Repo`) argument.
 
 ### Use with any repository
 
@@ -42,6 +43,7 @@ folder is installed:
 
 The launcher uses the current directory as the target repository and defaults
 to port `8765`. To launch from another directory, pass `-Repo "D:\Path\To\project"`;
+to connect several, pass `-Repo "D:\Path\To\project","D:\Path\To\another-project"`;
 to choose another port, pass `-Port 8766`. Then open <http://127.0.0.1:8765>.
 
 ## Start on macOS / Linux
@@ -62,18 +64,17 @@ Local Python server
 Existing Codex skills + registered specialist agents
 ```
 
-**Ticket files remain the source of truth.** “Active tickets” is inferred from the ticket status saved in `state.json`; it indicates workflow phase, not a confirmed live process. Acceptance criteria progress counts checked boxes in `ticket.md` and only changes when the ticket workflow records those checks. The execution monitor shows actual Codex events only for runs started through this dashboard. Independent subagent visibility depends on what the installed Codex version emits. Existing terminal or Codex desktop sessions started outside this dashboard are **not tracked as execution sessions**.
+**Ticket files remain the source of truth.** “Active tickets” is inferred from the ticket status saved in `state.json`; it indicates workflow phase, not a confirmed live process. Acceptance criteria progress counts checked boxes in `ticket.md` and only changes when the ticket workflow records those checks. The dashboard does not display live Codex run events. Run history and process tracking are held in memory and reset when the dashboard stops.
 
 ## Important operational notes
 
 1. Start only **one processing run per ticket**. The dashboard currently does not enforce this at the OS/file level; parallel runs on the same ticket can conflict.
 2. A successful Codex process exit is **not** proof that your QA tests passed. Inspect `qa-report.md`, check results, and perform human verification.
-3. `Stop run` sends a termination request to the CLI parent process; descendant processes might continue and require manual cleanup.
-4. Run sessions and event history are **in memory**; they reset when this dashboard stops. Ticket files persist.
-5. Ticket creation accepts **local paths to evidence** as text, which the CLI can inspect if accessible in its sandbox. Human rejection can upload up to 10 image or file attachments (20 MB total); these are saved under the ticket's `attachments/` directory and referenced from `verification.md`.
-6. The dashboard does not expose authorization controls; **do not expose its port publicly**. Treat anyone with local access to the dashboard as able to trigger Codex operations in the selected repo.
-7. Codex sandbox and approval behavior depend on your local installation and configuration. The dashboard selects `workspace-write` mode, and intentionally does not use dangerous full-access flags.
-8. On some Windows systems, `codex` is installed as `codex.cmd`, which is used automatically if present on PATH. If launching fails, try invoking the CLI directly and ensure your PATH is correct.
+3. Run sessions and event history are **in memory**; they reset when this dashboard stops. Ticket files persist.
+4. Ticket creation accepts **local paths to evidence** as text, which the CLI can inspect if accessible in its sandbox. Human rejection can upload up to 10 image or file attachments (20 MB total); these are saved under the ticket's `attachments/` directory and referenced from `verification.md`.
+5. The dashboard does not expose authorization controls; **do not expose its port publicly**. Treat anyone with local access to the dashboard as able to trigger Codex operations in the selected repo.
+6. Codex sandbox and approval behavior depend on your local installation and configuration. The dashboard selects `workspace-write` mode, and intentionally does not use dangerous full-access flags.
+7. On some Windows systems, `codex` is installed as `codex.cmd`, which is used automatically if present on PATH. If launching fails, try invoking the CLI directly and ensure your PATH is correct.
 
 ## Compatibility
 

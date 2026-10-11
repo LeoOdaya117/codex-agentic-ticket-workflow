@@ -33,11 +33,18 @@
 
     <div class="layout">
       <aside class="sidebar">
-        <div class="tiny muted">CONNECTED REPOSITORY</div>
+        <div class="repository-heading">
+          <span id="repo-picker-label">CONNECTED FOLDERS</span>
+          <button id="add-repo-button" class="add-repo" type="button" aria-label="Add repository folder" title="Add repository folder">+</button>
+        </div>
+        <div class="repo-picker" id="repo-picker">
+          <button id="repo-picker-button" class="repo-picker-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="repo-dropdown" aria-labelledby="repo-picker-label repo-picker-name">
+            <span id="repo-picker-name">Choose a folder</span>
+            <svg class="repo-picker-chevron" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5 7.5 5 5 5-5" /></svg>
+          </button>
+          <div id="repo-dropdown" class="repo-dropdown" role="listbox" aria-labelledby="repo-picker-label" hidden></div>
+        </div>
         <div class="repo" id="repo">—</div>
-        <div class="nav active">▦ &nbsp; Ticket overview</div>
-        <div class="nav">⌘ &nbsp; Execution monitor</div>
-        <div class="nav">✓ &nbsp; QA &amp; reports</div>
         <div class="note">
           Local-only dashboard.<br>
           Runs use your Codex CLI sign-in.<br>
@@ -49,7 +56,7 @@
         <div class="headline">
           <div>
             <h1>Engineering workflow</h1>
-            <div class="muted page-subtitle">Monitor tickets and start Codex workflows.</div>
+            <div class="muted page-subtitle">Tickets, Codex runs, and QA evidence in one board.</div>
           </div>
           <button id="create-open-button" type="button">+ Create ticket</button>
         </div>
@@ -61,42 +68,47 @@
           <div class="stat"><span class="muted tiny">Blocked / failed</span><strong id="count-failed">0</strong></div>
         </section>
 
-        <div class="columns">
-          <section class="panel" aria-labelledby="tickets-heading">
-            <div class="line">
-              <h2 id="tickets-heading">Tickets</h2>
-              <span class="muted tiny" id="ticket-count"></span>
-            </div>
-            <div id="tickets" class="empty">Loading tickets…</div>
-          </section>
-
-          <section class="detail-column" aria-label="Selected ticket and executions">
-            <div class="panel">
-              <div class="line">
-                <h2 id="detail-heading">Ticket details</h2>
-                <div class="action-buttons">
-                  <button class="secondary" id="process-button" type="button" hidden>▶ Process ticket</button>
-                  <button class="secondary" id="request-changes-button" type="button" hidden>↺ Request changes</button>
-                  <button class="complete-button" id="complete-button" type="button" hidden>✓ Mark Done</button>
-                </div>
-              </div>
-              <p id="action-message" class="action-message" role="status" aria-live="polite"></p>
-              <div id="detail" class="empty">Select a ticket to see its reports and QA evidence.</div>
-            </div>
-
-            <div class="panel execution-panel">
-              <div class="line">
-                <h2>Execution monitor</h2>
-                <button class="danger" id="stop-button" type="button" hidden>Stop run</button>
-              </div>
-              <div class="tiny muted">Runs started from this dashboard only. Polls every 2 seconds.</div>
-              <div id="runs" class="run-list"></div>
-              <div id="events" class="log empty">Select an execution run to see its Codex events.</div>
-            </div>
-          </section>
+        <div id="status-board" class="status-board" role="region" aria-label="Tickets by workflow status">
+          <div class="empty">Loading tickets…</div>
         </div>
+
       </main>
     </div>
+
+    <dialog id="ticket-detail-dialog" class="dialog ticket-detail-dialog" aria-labelledby="detail-heading">
+      <div class="line ticket-dialog-heading">
+        <div>
+          <div id="detail-ticket-id" class="tiny muted"></div>
+          <h2 id="detail-heading">Ticket details</h2>
+        </div>
+        <div class="action-buttons">
+          <button class="secondary" id="process-button" type="button" hidden>▶ Process ticket</button>
+          <button class="secondary" id="request-changes-button" type="button" hidden>↺ Request changes</button>
+          <button class="complete-button" id="complete-button" type="button" hidden>✓ Mark Done</button>
+          <form method="dialog"><button class="secondary" type="submit" aria-label="Close ticket details">✕</button></form>
+        </div>
+      </div>
+      <p id="action-message" class="action-message" role="status" aria-live="polite"></p>
+      <div id="detail" class="empty">Select a ticket to inspect its details.</div>
+    </dialog>
+
+    <dialog id="repo-dialog" class="dialog">
+      <form method="dialog">
+        <div class="line">
+          <h2>Add repository folder</h2>
+          <button class="secondary" type="submit" aria-label="Close dialog">✕</button>
+        </div>
+      </form>
+      <p class="muted dialog-description">Choose a folder on this computer or enter its full path. The folder stays connected for this dashboard session.</p>
+      <div class="repo-picker-row">
+        <button id="browse-repo-button" class="secondary" type="button">Browse folders…</button>
+        <span id="repo-picker-status" class="tiny muted" role="status"></span>
+      </div>
+      <label for="repo-path">Folder path</label>
+      <input id="repo-path" type="text" autocomplete="off" placeholder="D:\Projects\my-project">
+      <div id="repo-add-message" class="action-message" role="status" aria-live="polite"></div>
+      <div class="dialog-actions"><button id="connect-repo-button" type="button">Connect folder</button></div>
+    </dialog>
 
     <dialog id="new-dialog" class="dialog">
       <form method="dialog">

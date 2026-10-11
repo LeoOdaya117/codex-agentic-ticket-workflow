@@ -2,8 +2,46 @@ import tempfile, unittest, json
 from pathlib import Path
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from server import ROOT, tickets, detail, find_ticket_dir, local_request_allowed, active_ticket_count, complete_ticket, reject_ticket, public_asset
+import server as dashboard_server
+from server import ROOT, tickets, detail, find_ticket_dir, local_request_allowed, active_ticket_count, complete_ticket, reject_ticket, public_asset, add_repository, REPOSITORIES, repository_id, runs_for_repository
 class TestTicketReading(unittest.TestCase):
+    def test_repositories_can_be_registered_and_have_stable_ids(self):
+        original=REPOSITORIES.copy()
+        with tempfile.TemporaryDirectory() as t:
+            try:
+                repo=Path(t)
+                item=add_repository(repo)
+                self.assertEqual(item['id'],repository_id(repo))
+                self.assertEqual(Path(item['path']),repo.resolve())
+                self.assertEqual(REPOSITORIES[item['id']],repo.resolve())
+                with self.assertRaisesRegex(ValueError,'Enter a repository folder path'):
+                    add_repository(' ')
+                with self.assertRaisesRegex(ValueError,'Folder does not exist'):
+                    add_repository(repo/'missing')
+            finally:
+                REPOSITORIES.clear()
+                REPOSITORIES.update(original)
+    def test_ticket_and_run_scoping_follow_repository(self):
+        original=REPOSITORIES.copy()
+        with tempfile.TemporaryDirectory() as t:
+            try:
+                repos=[]
+                for name in ('alpha','beta'):
+                    repo=Path(t)/name;ticket=repo/'tickets'/'TKT-0001';ticket.mkdir(parents=True)
+                    (ticket/'ticket.md').write_text(f'# {name}',encoding='utf-8')
+                    repos.append(add_repository(repo))
+                with dashboard_server.LOCK:
+                    dashboard_server.RUNS['test-run-alpha']={'id':'test-run-alpha','repo_id':repos[0]['id'],'events':[],'process':None}
+                    dashboard_server.RUNS['test-run-beta']={'id':'test-run-beta','repo_id':repos[1]['id'],'events':[],'process':None}
+                for repo,name,run_id in zip(repos,('alpha','beta'),('test-run-alpha','test-run-beta')):
+                    self.assertEqual(tickets(Path(repo['path']))[0]['title'],name)
+                    self.assertEqual([run['id'] for run in runs_for_repository(repo['id'])],[run_id])
+                    self.assertNotIn('events',runs_for_repository(repo['id'])[0])
+            finally:
+                with dashboard_server.LOCK:
+                    dashboard_server.RUNS.pop('test-run-alpha',None)
+                    dashboard_server.RUNS.pop('test-run-beta',None)
+                REPOSITORIES.clear();REPOSITORIES.update(original)
     def test_active_ticket_count_uses_ticket_status_not_dashboard_runs(self):
         self.assertEqual(active_ticket_count([
             {'status':'Implementing'}, {'status':'QA Testing'},

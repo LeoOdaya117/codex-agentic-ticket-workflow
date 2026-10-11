@@ -1,6 +1,17 @@
-const state = { tickets: [], runs: [] };
+const state = { tickets: [], runs: [], detail: null, repositories: [] };
+const STATUS_ORDER = [
+  "Open",
+  "Investigating",
+  "Planning",
+  "Implementing",
+  "Code Review",
+  "QA Testing",
+  "Ready for Human Verification",
+  "Done",
+  "Blocked",
+];
+let repoId = null;
 let ticketId = null;
-let runId = null;
 let selectedTab = "ticket.md";
 
 const byId = (id) => document.getElementById(id);
@@ -13,10 +24,54 @@ const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character
 }[character]));
 
 async function api(path, options) {
+  if (repoId && !["/api/repos", "/api/browse"].includes(path.split("?")[0])) {
+    const separator = path.includes("?") ? "&" : "?";
+    path = `${path}${separator}repo=${encodeURIComponent(repoId)}`;
+  }
   const response = await fetch(path, options);
   const value = await response.json();
   if (!response.ok) throw new Error(value.error || "Request failed");
   return value;
+}
+
+async function loadRepositories() {
+  const response = await api("/api/repos");
+  state.repositories = response.repos || [];
+  repoId = state.repositories.some((repo) => repo.id === repoId) ? repoId : response.selected || state.repositories[0]?.id || null;
+  try { if (repoId) localStorage.setItem("agentops-repo", repoId); } catch { /* Storage may be unavailable. */ }
+  renderRepositories();
+}
+
+function renderRepositories() {
+  const selected = state.repositories.find((repo) => repo.id === repoId);
+  const trigger = byId("repo-picker-button");
+  byId("repo-picker-name").textContent = selected?.name || "Choose a folder";
+  trigger.disabled = !state.repositories.length;
+  trigger.setAttribute("aria-label", selected
+    ? `${selected.name}, connected folder. Show folders`
+    : "Choose a connected folder");
+  byId("repo-dropdown").innerHTML = state.repositories.map((repo) => `
+    <button class="repo-option" id="repo-option-${escapeHtml(repo.id)}" type="button" role="option"
+      data-repo-id="${escapeHtml(repo.id)}" aria-selected="${repo.id === repoId}" tabindex="-1">
+      <span class="repo-option-name">${escapeHtml(repo.name)}</span>
+      <span class="repo-option-path">${escapeHtml(repo.path)}</span>
+      <svg class="repo-option-check" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 10 4 4 8-8" /></svg>
+    </button>`).join("") || '<div class="repo-dropdown-empty">No folders connected yet.</div>';
+}
+
+function repositoryOptions() {
+  return [...byId("repo-dropdown").querySelectorAll('[role="option"]')];
+}
+
+function setRepositoryMenu(open, focusOption = false) {
+  const trigger = byId("repo-picker-button");
+  trigger.setAttribute("aria-expanded", String(open));
+  trigger.classList.toggle("is-open", open);
+  byId("repo-dropdown").hidden = !open;
+  if (open && focusOption) {
+    const options = repositoryOptions();
+    (options.find((option) => option.getAttribute("aria-selected") === "true") || options[0])?.focus();
+  }
 }
 
 function post(data) {
@@ -47,17 +102,15 @@ async function refresh() {
     connection.textContent = "● Local connection active";
     connection.className = "connection online";
     byId("repo").textContent = overview.repo;
+    byId("repo").title = overview.repo;
     byId("count-total").textContent = state.tickets.length;
     byId("count-active").textContent = overview.active_tickets ?? state.tickets.filter((ticket) =>
       ["investigating", "planning", "implementing", "code review", "qa testing"]
         .includes(String(ticket.status || "").trim().toLowerCase())).length;
     byId("count-ready").textContent = state.tickets.filter((ticket) => /ready.*verif/i.test(ticket.status)).length;
     byId("count-failed").textContent = state.tickets.filter((ticket) => /failed|blocked/i.test(ticket.status)).length;
-    byId("ticket-count").textContent = `${state.tickets.length} found`;
     renderTickets();
-    renderRuns();
 
-    if (runId) await refreshEvents();
     if (ticketId) await loadDetail(false);
   } catch (error) {
     byId("connection").textContent = `● Connection error: ${error.message}`;
@@ -65,51 +118,143 @@ async function refresh() {
   }
 }
 
-function renderTickets() {
-  const container = byId("tickets");
-  if (!state.tickets.length) {
-    container.className = "empty";
-    container.textContent = "No tickets yet. Use Create ticket or add tickets in your repository.";
-    return;
-  }
-
-  container.className = "ticket-list";
-  container.innerHTML = state.tickets.map((ticket) => `
-    <article class="ticket ${ticket.id === ticketId ? "sel" : ""}"
-      data-ticket-id="${escapeHtml(ticket.id)}" role="button" tabindex="0"
-      aria-pressed="${ticket.id === ticketId}">
-      <div class="line ticket-meta">
-        <span class="tiny muted">${escapeHtml(ticket.id)} · ${escapeHtml(ticket.type)}</span>
-        ${badge(ticket.status)}
-      </div>
-      <div class="ticket-title">${escapeHtml(ticket.title)}</div>
-      <div class="line tiny muted">
-        <span>Priority: ${escapeHtml(ticket.priority)}</span>
-        <span>${ticket.checked}/${ticket.total} acceptance criteria</span>
-      </div>
-      <div class="progress"><i style="width:${ticket.total ? ticket.checked / ticket.total * 100 : 0}%"></i></div>
-    </article>`).join("");
-}
-
-async function selectTicket(id) {
-  ticketId = id;
+async function selectRepository(id) {
+  if (!id || id === repoId) return;
+  repoId = id;
+  try { localStorage.setItem("agentops-repo", repoId); } catch { /* Storage may be unavailable. */ }
+  renderRepositories();
+  ticketId = null;
   selectedTab = "ticket.md";
-  await loadDetail(true);
+  state.detail = null;
+  byId("detail-heading").textContent = "Ticket details";
+  byId("process-button").hidden = true;
+  byId("request-changes-button").hidden = true;
+  byId("complete-button").hidden = true;
+  byId("action-message").textContent = "";
+  byId("detail").className = "empty";
+  byId("detail").textContent = "Select a ticket to see its reports and QA evidence.";
+  byId("ticket-detail-dialog").close();
   await refresh();
 }
 
-async function loadDetail(force) {
+function showAddRepository() {
+  byId("repo-path").value = "";
+  byId("repo-add-message").textContent = "";
+  byId("repo-picker-status").textContent = "";
+  byId("repo-dialog").showModal();
+}
+
+async function browseRepository() {
+  const status = byId("repo-picker-status");
+  status.textContent = "Choose a folder in the system dialog…";
+  try {
+    const result = await api("/api/browse");
+    if (result.path) byId("repo-path").value = result.path;
+    status.textContent = result.path ? "Folder selected" : "No folder selected";
+  } catch (error) {
+    status.textContent = error.message;
+  }
+}
+
+async function connectRepository() {
+  const button = byId("connect-repo-button");
+  const message = byId("repo-add-message");
+  button.disabled = true;
+  message.className = "action-message";
+  message.textContent = "Connecting folder…";
+  try {
+    const repo = await api("/api/repos", post({ path: byId("repo-path").value.trim() }));
+    repoId = repo.id;
+    await loadRepositories();
+    byId("repo-dialog").close();
+    ticketId = null;
+    byId("ticket-detail-dialog").close();
+    await refresh();
+  } catch (error) {
+    message.className = "action-message error";
+    message.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderTickets() {
+  const container = byId("status-board");
+  const horizontalScroll = container.scrollLeft;
+  const columnScroll = new Map([...container.querySelectorAll(".status-column")].map((column) => [
+    column.querySelector("h2")?.textContent,
+    column.querySelector(".status-cards")?.scrollTop || 0,
+  ]));
+  const extraStatuses = [...new Set(
+    state.tickets
+    .map((ticket) => String(ticket.status || "Open").trim())
+    .filter((status) => !STATUS_ORDER.some((known) => known.toLowerCase() === status.toLowerCase())),
+  )].sort((a, b) => a.localeCompare(b));
+  const statuses = [...STATUS_ORDER, ...extraStatuses];
+  container.className = "status-board";
+  container.innerHTML = statuses.map((status, index) => {
+    const tickets = state.tickets.filter((ticket) =>
+      String(ticket.status || "Open").trim().toLowerCase() === status.toLowerCase());
+    const cards = tickets.map((ticket) => {
+      const focusQa = /qa testing|ready for human verification|done/i.test(String(ticket.status || ""));
+      const priority = String(ticket.priority || "Unassigned").trim();
+      const priorityLabel = priority.replace(/\s*\(proposed;\s*triage required\)/i, " · proposed");
+      return `
+        <article class="ticket kanban-ticket ${ticket.id === ticketId ? "sel" : ""}"
+          data-ticket-id="${escapeHtml(ticket.id)}" data-focus-qa="${focusQa}"
+          role="button" tabindex="0" aria-pressed="${ticket.id === ticketId}"
+          aria-label="${escapeHtml(ticket.id)} ${escapeHtml(ticket.title)}, priority ${escapeHtml(ticket.priority)}">
+          <div class="line ticket-meta">
+            <span class="tiny muted">${escapeHtml(ticket.id)} · ${escapeHtml(ticket.type)}</span>
+            <span class="tag priority-tag" title="${escapeHtml(priority)}">${escapeHtml(priorityLabel)}</span>
+          </div>
+          <div class="ticket-title">${escapeHtml(ticket.title)}</div>
+          <div class="ticket-progress-label tiny muted">${ticket.checked}/${ticket.total} acceptance criteria</div>
+          <div class="progress"><i style="width:${ticket.total ? ticket.checked / ticket.total * 100 : 0}%"></i></div>
+        </article>`;
+    }).join("");
+    return `
+      <section class="status-column" data-status="${escapeHtml(status.toLowerCase().replaceAll(" ", "-"))}" aria-labelledby="status-heading-${index}">
+        <header class="status-column-heading">
+          <h2 id="status-heading-${index}">${escapeHtml(status)}</h2>
+          <span class="lane-count">${tickets.length}</span>
+        </header>
+        <div class="status-cards">${cards || '<div class="column-empty">No tickets</div>'}</div>
+      </section>`;
+  }).join("");
+  container.scrollLeft = horizontalScroll;
+  for (const column of container.querySelectorAll(".status-column")) {
+    column.querySelector(".status-cards").scrollTop = columnScroll.get(column.querySelector("h2").textContent) || 0;
+  }
+}
+
+async function selectTicket(id, focusQa = false) {
+  ticketId = id;
+  selectedTab = "ticket.md";
+  await loadDetail(true, focusQa);
+  byId("ticket-detail-dialog").showModal();
+  await refresh();
+}
+
+async function loadDetail(force, focusQa = false) {
   const detail = await api(`/api/tickets/${encodeURIComponent(ticketId)}`);
+  state.detail = detail;
   const isDone = String(detail.summary.status || "").trim().toLowerCase() === "done";
   const needsVerification = String(detail.summary.status || "").trim().toLowerCase() === "ready for human verification";
   const hasActiveProcess = state.runs.some((run) => run.ticket_id === ticketId
     && run.mode === "process" && ["launching", "running", "cancelling"].includes(run.status));
-  byId("detail-heading").textContent = detail.summary.id;
+  byId("detail-ticket-id").textContent = detail.summary.id;
   byId("process-button").hidden = isDone || hasActiveProcess;
   byId("request-changes-button").hidden = !needsVerification;
   byId("complete-button").hidden = !needsVerification;
 
   const keys = [...Object.keys(detail.files), ...detail.reports.map((report) => `agent-reports/${report.name}`)];
+  if (focusQa) {
+    selectedTab = ["qa-report.md", "verification.md"].find((name) => keys.includes(name))
+      || keys.find((name) => name.startsWith("agent-reports/"))
+      || keys[0]
+      || "ticket.md";
+  }
   if (!keys.includes(selectedTab)) selectedTab = keys[0] || "ticket.md";
   const content = detail.files[selectedTab]
     ?? detail.reports.find((report) => `agent-reports/${report.name}` === selectedTab)?.content
@@ -144,36 +289,6 @@ function selectTab(tab) {
   loadDetail(true);
 }
 
-function renderRuns() {
-  const runs = [...state.runs].reverse();
-  byId("runs").innerHTML = runs.slice(0, 15).map((run) => `
-    <div class="ticket run-ticket ${run.id === runId ? "sel" : ""}" data-run-id="${escapeHtml(run.id)}" role="button" tabindex="0" aria-pressed="${run.id === runId}">
-      <div class="line"><span class="tiny">${escapeHtml(run.mode)} · ${escapeHtml(run.ticket_id || "new ticket")}</span>${badge(run.status)}</div>
-      <div class="tiny muted">${escapeHtml(run.id)} · ${escapeHtml(run.started)}</div>
-    </div>`).join("") || '<div class="empty">No dashboard-started runs yet.</div>';
-
-  const activeRun = runs.some((run) => run.id === runId && ["running", "launching"].includes(run.status));
-  byId("stop-button").hidden = !runId || !activeRun;
-}
-
-function selectRun(id) {
-  runId = id;
-  renderRuns();
-  refreshEvents();
-}
-
-async function refreshEvents() {
-  try {
-    const run = await api(`/api/runs/${encodeURIComponent(runId)}`);
-    byId("events").classList.remove("empty");
-    byId("events").innerHTML = (run.events || []).map((event) => `
-      <div class="event"><span>${escapeHtml(event.time)}</span><br>${escapeHtml(event.message || JSON.stringify(event.payload) || event.kind)}</div>`)
-      .join("") || '<div class="empty">Waiting for Codex events…</div>';
-  } catch (error) {
-    byId("events").textContent = error.message;
-  }
-}
-
 function setTheme(theme, persist = true) {
   document.documentElement.dataset.theme = theme;
   byId("theme-light").setAttribute("aria-pressed", String(theme === "light"));
@@ -189,14 +304,13 @@ function showCreate() {
 
 async function createTicket() {
   try {
-    const result = await api("/api/run", post({
+    await api("/api/run", post({
       mode: "create",
       description: byId("description").value,
       attachments: byId("attachments").value.split("\n").map((path) => path.trim()).filter(Boolean),
     }));
     byId("new-dialog").close();
     byId("description").value = "";
-    runId = result.run_id;
     await refresh();
   } catch (error) {
     alert(error.message);
@@ -205,8 +319,7 @@ async function createTicket() {
 
 async function runTicket() {
   try {
-    const result = await api("/api/run", post({ mode: "process", ticket_id: ticketId }));
-    runId = result.run_id;
+    await api("/api/run", post({ mode: "process", ticket_id: ticketId }));
     await refresh();
   } catch (error) {
     alert(error.message);
@@ -285,7 +398,6 @@ async function rejectTicket() {
     form.append("description", description);
     for (const file of byId("rejection-attachments").files) form.append("attachments", file, file.name);
     const result = await api(`/api/tickets/${encodeURIComponent(ticketId)}/reject`, { method: "POST", body: form });
-    if (result.run_id) runId = result.run_id;
     byId("reject-dialog").close();
     await refresh();
     byId("action-message").className = "action-message";
@@ -299,16 +411,6 @@ async function rejectTicket() {
   }
 }
 
-async function stopRun() {
-  if (!confirm("Request termination of this Codex run?")) return;
-  try {
-    await api(`/api/stop/${encodeURIComponent(runId)}`, post({}));
-    await refresh();
-  } catch (error) {
-    alert(error.message);
-  }
-}
-
 byId("theme-light").addEventListener("click", () => setTheme("light"));
 byId("theme-dark").addEventListener("click", () => setTheme("dark"));
 byId("create-open-button").addEventListener("click", showCreate);
@@ -317,30 +419,67 @@ byId("process-button").addEventListener("click", runTicket);
 byId("complete-button").addEventListener("click", completeTicket);
 byId("request-changes-button").addEventListener("click", showRejection);
 byId("reject-ticket-button").addEventListener("click", rejectTicket);
-byId("stop-button").addEventListener("click", stopRun);
 byId("rejection-attachment-type").addEventListener("change", updateAttachmentFilter);
 byId("rejection-attachments").addEventListener("change", updateAttachmentList);
-
-byId("tickets").addEventListener("click", (event) => {
-  const card = event.target.closest("[data-ticket-id]");
-  if (card) selectTicket(card.dataset.ticketId);
+byId("repo-picker-button").addEventListener("click", () => {
+  const open = byId("repo-picker-button").getAttribute("aria-expanded") !== "true";
+  setRepositoryMenu(open, open);
 });
-byId("tickets").addEventListener("keydown", (event) => {
-  const card = event.target.closest("[data-ticket-id]");
-  if (card && (event.key === "Enter" || event.key === " ")) {
+byId("repo-picker-button").addEventListener("keydown", (event) => {
+  if (["ArrowDown", "ArrowUp"].includes(event.key)) {
     event.preventDefault();
-    selectTicket(card.dataset.ticketId);
+    setRepositoryMenu(true, true);
+  } else if (event.key === "Escape") {
+    setRepositoryMenu(false);
   }
 });
-byId("runs").addEventListener("click", (event) => {
-  const card = event.target.closest("[data-run-id]");
-  if (card) selectRun(card.dataset.runId);
+byId("repo-dropdown").addEventListener("click", (event) => {
+  const option = event.target.closest("[data-repo-id]");
+  if (!option) return;
+  setRepositoryMenu(false);
+  selectRepository(option.dataset.repoId);
 });
-byId("runs").addEventListener("keydown", (event) => {
-  const card = event.target.closest("[data-run-id]");
+byId("repo-dropdown").addEventListener("keydown", (event) => {
+  const options = repositoryOptions();
+  const currentIndex = options.indexOf(event.target.closest('[role="option"]'));
+  let nextIndex = currentIndex;
+  if (event.key === "ArrowDown") nextIndex = Math.min(options.length - 1, currentIndex + 1);
+  else if (event.key === "ArrowUp") nextIndex = Math.max(0, currentIndex - 1);
+  else if (event.key === "Home") nextIndex = 0;
+  else if (event.key === "End") nextIndex = options.length - 1;
+  else if (event.key === "Escape") {
+    event.preventDefault();
+    setRepositoryMenu(false);
+    byId("repo-picker-button").focus();
+    return;
+  } else if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    event.target.closest('[role="option"]')?.click();
+    return;
+  } else return;
+  event.preventDefault();
+  options[nextIndex]?.focus();
+});
+document.addEventListener("pointerdown", (event) => {
+  if (!byId("repo-picker").contains(event.target)) setRepositoryMenu(false);
+});
+byId("repo-picker").addEventListener("focusout", () => {
+  window.setTimeout(() => {
+    if (!byId("repo-picker").contains(document.activeElement)) setRepositoryMenu(false);
+  }, 0);
+});
+byId("add-repo-button").addEventListener("click", showAddRepository);
+byId("browse-repo-button").addEventListener("click", browseRepository);
+byId("connect-repo-button").addEventListener("click", connectRepository);
+byId("status-board").addEventListener("click", (event) => {
+  const card = event.target.closest("[data-ticket-id]");
+  if (card) selectTicket(card.dataset.ticketId, card.dataset.focusQa === "true");
+});
+byId("status-board").addEventListener("keydown", (event) => {
+  const card = event.target.closest("[data-ticket-id]");
   if (card && (event.key === "Enter" || event.key === " ")) {
     event.preventDefault();
-    selectRun(card.dataset.runId);
+    selectTicket(card.dataset.ticketId, card.dataset.focusQa === "true");
   }
 });
 byId("detail").addEventListener("click", (event) => {
@@ -349,5 +488,9 @@ byId("detail").addEventListener("click", (event) => {
 });
 
 setTheme(document.documentElement.dataset.theme || "dark", false);
-refresh();
+try { repoId = localStorage.getItem("agentops-repo"); } catch { /* Storage may be unavailable. */ }
+loadRepositories().then(refresh).catch((error) => {
+  byId("connection").textContent = `● Connection error: ${error.message}`;
+  byId("connection").className = "connection error";
+});
 window.setInterval(refresh, 2000);
