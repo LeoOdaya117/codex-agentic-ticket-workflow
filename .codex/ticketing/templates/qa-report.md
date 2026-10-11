@@ -10,3 +10,11 @@ Result: NOT RUN
 
 ## Failures, limitations and evidence
 
+## Delivery
+
+- Worktree:
+- Branch:
+- Commit SHA:
+- Pull request URL:
+- Human test notes:
+

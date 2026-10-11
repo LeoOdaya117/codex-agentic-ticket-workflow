@@ -1,10 +1,48 @@
-import tempfile, unittest, json
+import tempfile, unittest, json, shutil, subprocess
 from pathlib import Path
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import server as dashboard_server
-from server import ROOT, tickets, detail, find_ticket_dir, local_request_allowed, active_ticket_count, complete_ticket, reject_ticket, public_asset, add_repository, REPOSITORIES, repository_id, runs_for_repository, stage_create_uploads, MAX_FEEDBACK_UPLOAD, MAX_FEEDBACK_FILES
+from server import ROOT, tickets, detail, find_ticket_dir, local_request_allowed, active_ticket_count, complete_ticket, reject_ticket, public_asset, add_repository, REPOSITORIES, repository_id, runs_for_repository, stage_create_uploads, ensure_ticket_worktree, acquire_process_lock, release_process_lock, MAX_FEEDBACK_UPLOAD, MAX_FEEDBACK_FILES
 class TestTicketReading(unittest.TestCase):
+    def test_process_lock_prevents_duplicate_ticket_runs(self):
+        with tempfile.TemporaryDirectory() as t:
+            path=Path(t)/'.locks'/'TKT-0001.lock'
+            held=acquire_process_lock(path)
+            try:
+                with self.assertRaisesRegex(ValueError,'already active'):
+                    acquire_process_lock(path)
+            finally:
+                release_process_lock(held)
+            released=acquire_process_lock(path)
+            release_process_lock(released)
+
+    @unittest.skipUnless(shutil.which('git'),'Git is required for worktree tests')
+    def test_ticket_worktrees_isolate_concurrent_tickets_and_resume_by_ticket(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as t:
+            repo=Path(t)/'sample repo';repo.mkdir()
+            def git(*args):
+                return subprocess.run(['git','-C',str(repo),*args],check=True,capture_output=True,
+                                      text=True,encoding='utf-8',errors='replace').stdout.strip()
+            git('init')
+            git('config','user.name','AgentOps Test')
+            git('config','user.email','agentops-test@example.invalid')
+            (repo/'tracked.txt').write_text('baseline\n',encoding='utf-8')
+            git('add','tracked.txt');git('commit','-m','baseline');git('checkout','-b','main')
+            first=ensure_ticket_worktree(repo,'TKT-0001')
+            second=ensure_ticket_worktree(repo,'TKT-0002')
+            self.assertNotEqual(first['path'],second['path'])
+            self.assertNotEqual(first['branch'],second['branch'])
+            self.assertEqual(first['branch'],'codex/TKT-0001')
+            self.assertEqual(second['branch'],'codex/TKT-0002')
+            self.assertEqual(first['head_commit'],second['head_commit'])
+            (first['path']/'ticket-change.txt').write_text('one ticket only\n',encoding='utf-8')
+            resumed=ensure_ticket_worktree(repo,'TKT-0001')
+            self.assertTrue(resumed['resumed'])
+            self.assertEqual(resumed['path'],first['path'])
+            self.assertTrue((resumed['path']/'ticket-change.txt').is_file())
+            self.assertFalse((second['path']/'ticket-change.txt').exists())
+
     def test_create_uploads_are_staged_inside_repo_with_safe_unique_names(self):
         with tempfile.TemporaryDirectory() as t:
             repo=Path(t)
@@ -69,11 +107,12 @@ class TestTicketReading(unittest.TestCase):
     def test_read_and_progress(self):
         with tempfile.TemporaryDirectory() as t:
             p=Path(t)/'tickets'/'TKT-0001';p.mkdir(parents=True)
-            (p/'ticket.md').write_text('# TKT-0001 — Fix login\n**Status:** Planning\n**Priority:** High\n- [x] first\n- [ ] next',encoding='utf-8')
+            (p/'ticket.md').write_text('# TKT-0001 — Fix login\n**Status:** Planning\n**Priority:** High\n- [x] first\n- [ ] next\n\n## Delivery\n- Pull request: https://github.com/example/repo/pull/1',encoding='utf-8')
             (p/'qa-report.md').write_text('Not run',encoding='utf-8')
             self.assertEqual(tickets(Path(t))[0]['checked'],1)
             self.assertEqual(tickets(Path(t))[0]['total'],2)
             self.assertEqual(tickets(Path(t))[0]['priority'],'High')
+            self.assertEqual(tickets(Path(t))[0]['pull_request'],'https://github.com/example/repo/pull/1')
             self.assertEqual(detail(Path(t),'TKT-0001')['files']['qa-report.md'],'Not run')
     def test_priority_in_markdown_list_item(self):
         with tempfile.TemporaryDirectory() as t:

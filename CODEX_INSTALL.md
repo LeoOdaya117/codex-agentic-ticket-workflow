@@ -22,7 +22,7 @@ You are Codex running in the **target existing repository**. The user has suppli
 - `$project-init`: build verified project knowledge.
 - `$discover-team`: inventory and map available specialists and skills.
 - `$create-ticket <description>`: create a formatted ticket from natural language, screenshot or log paths, and repository context. Do not implement.
-- `$process-ticket TKT-0001`: lead orchestrator investigates, plans, assigns existing agents, implements, reviews, QA-tests, and stops for human verification. Native parallel agents only when supported by current Codex and safe for independent files/worktrees.
+- `$process-ticket TKT-0001`: start the Codex task in its own worktree, or use the dashboard to prepare one. The lead investigates, plans, assigns existing agents, implements, reviews, QA-tests, commits and pushes the ticket branch, and opens or updates a PR for human testing. Each ticket uses its own branch and worktree; corrections reuse that ticket's worktree and PR. The workflow stops at human verification and never merges.
 - `$verify-ticket TKT-0001`: record human acceptance/rejection.
 
-The kit uses the signed-in local Codex CLI; **do not request an OpenAI API key**. Do not claim always-on GitHub monitoring, automatic parallelism, or successful QA without real execution evidence. Never merge, deploy, or close tickets automatically.
+The kit uses the signed-in local Codex CLI; **do not request an OpenAI API key**. Do not claim always-on GitHub monitoring, automatic agent parallelism, or successful QA without real execution evidence. Git worktrees isolate separate ticket runs; they do not imply specialist agents ran in parallel. Never merge, deploy, or close tickets or PRs automatically.

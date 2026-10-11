@@ -34,6 +34,14 @@
 
 [Relative paths, links, screenshots, logs; note unavailable context.]
 
+## Delivery
+
+- Worktree: [assigned worktree path]
+- Branch: [ticket branch]
+- Commit SHA: [full or abbreviated commit SHA]
+- Pull request: [URL]
+- Human test notes: [how to test the open PR]
+
 ## Technical context / hypotheses
 
 [Separate confirmed findings from possible causes.]
