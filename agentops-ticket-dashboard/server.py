@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Local-only Codex ticket dashboard; Python standard library."""
-import argparse, hashlib, json, os, re, subprocess, threading, time, uuid, shutil, sys
+import argparse, hashlib, json, os, re, subprocess, threading, time, uuid, shutil, sys, tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from email.parser import BytesParser
@@ -242,8 +242,44 @@ def log_event(run_id, data):
         run['events'].append({'time':now(),**data})
         if len(run['events'])>MAX_EVENTS:run['events']=run['events'][-MAX_EVENTS:]
 
-def spawn_codex(repo, ticket_id, mode, description='', attachments=None, repo_id=None):
+def stage_create_uploads(repo, uploads):
+    """Stage browser uploads inside the selected workspace for the lifetime of a create run."""
+    uploads=uploads or []
+    if len(uploads)>MAX_FEEDBACK_FILES: raise ValueError(f'Attach no more than {MAX_FEEDBACK_FILES} files')
+    if sum(len(content) for _,content in uploads)>MAX_FEEDBACK_UPLOAD:
+        raise ValueError('Attachments must total 20 MB or less')
+    if not uploads: return None,[]
+    repo=Path(repo).resolve()
+    staging=Path(tempfile.mkdtemp(prefix='.ticket-intake-',dir=repo)).resolve()
+    if not staging.is_relative_to(repo):
+        shutil.rmtree(staging,ignore_errors=True)
+        raise ValueError('Upload staging must stay inside the selected repository')
+    staged=[]
+    try:
+        for original_name,content in uploads:
+            filename=str(original_name or 'attachment').replace('\\','/').rsplit('/',1)[-1]
+            filename=re.sub(r'[^A-Za-z0-9._-]+','_',filename).strip('._')[:120] or 'attachment'
+            stem,suffix=Path(filename).stem,Path(filename).suffix
+            target=staging/filename
+            counter=2
+            while target.exists():
+                target=staging/f'{stem}-{counter}{suffix}'
+                counter+=1
+            if not target.resolve().is_relative_to(staging):
+                raise ValueError('Attachment must stay inside the upload staging directory')
+            with target.open('xb') as stream: stream.write(content)
+            staged.append(str(target))
+        return staging,staged
+    except OSError as exc:
+        shutil.rmtree(staging,ignore_errors=True)
+        raise RuntimeError(f'Could not stage attachment: {exc}') from exc
+    except Exception:
+        shutil.rmtree(staging,ignore_errors=True)
+        raise
+
+def spawn_codex(repo, ticket_id, mode, description='', attachments=None, repo_id=None, uploads=None):
     if not shutil.which('codex') and not shutil.which('codex.cmd'): raise RuntimeError('Codex CLI not found on PATH. Install and sign in first.')
+    staging=None
     if mode=='process':
         if not find_ticket_dir(repo,ticket_id): raise ValueError('Ticket not found')
         prompt=(f'Use the installed $process-ticket workflow for {ticket_id}. Read repository AGENTS.md and applicable skill instructions. '
@@ -253,7 +289,8 @@ def spawn_codex(repo, ticket_id, mode, description='', attachments=None, repo_id
                 'Do not claim test success unless commands actually passed.')
     else:
         if not description.strip():raise ValueError('Description is required')
-        attachment_lines='\n'.join(str(x) for x in (attachments or []))
+        staging,uploaded_paths=stage_create_uploads(repo,uploads)
+        attachment_lines='\n'.join([*(str(x) for x in (attachments or [])),*uploaded_paths])
         prompt=(f'Use the installed $create-ticket skill. Create a structured ticket from this report and any existing referenced local evidence. '
                 f'Do not implement.\n\nIssue description:\n{description[:10000]}\n\nAttachment paths (only inspect if present):\n{attachment_lines}')
     exe=shutil.which('codex') or shutil.which('codex.cmd')
@@ -285,6 +322,8 @@ def spawn_codex(repo, ticket_id, mode, description='', attachments=None, repo_id
         except Exception as exc:
             log_event(run_id,{'kind':'error','message':str(exc)})
             update(run_id,status='failed',ended=now(),process=None)
+        finally:
+            if staging: shutil.rmtree(staging,ignore_errors=True)
     threading.Thread(target=worker,daemon=True).start()
     return run_id
 
@@ -380,9 +419,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(202 if result['run_id'] else 200,result)
             except (ValueError,TypeError) as exc:return self.respond(400,{'error':str(exc)})
             except RuntimeError as exc:return self.respond(409,{'error':str(exc)})
-        if not self.headers.get('Content-Type','').lower().startswith('application/json'):
-            return self.respond(415, {'error':'Content-Type must be application/json'})
         try:
+            content_type=self.headers.get('Content-Type','').lower()
+            if path=='/api/run' and content_type.startswith('multipart/form-data'):
+                fields,uploads=self.multipart()
+                mode=fields.get('mode')
+                if mode!='create':raise ValueError('Multipart uploads are only supported for ticket creation')
+                try: attachment_paths=json.loads(fields.get('attachment_paths','[]'))
+                except json.JSONDecodeError as exc:raise ValueError('Invalid local attachment paths') from exc
+                if not isinstance(attachment_paths,list) or any(not isinstance(item,str) for item in attachment_paths):
+                    raise ValueError('Local attachment paths must be a list of strings')
+                rid=spawn_codex(repo,'','create',str(fields.get('description','')),attachment_paths,repo_id=selected_id,uploads=uploads)
+                return self.respond(202,{'run_id':rid})
+            if not content_type.startswith('application/json'):
+                return self.respond(415, {'error':'Content-Type must be application/json'})
             data=self.body()
             if path=='/api/run':
                 mode=data.get('mode');tid=str(data.get('ticket_id',''))

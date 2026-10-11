@@ -119,9 +119,21 @@
       </form>
       <label for="description">Issue description</label>
       <textarea id="description" placeholder="Describe the bug or feature, expected behavior, reproduction steps…"></textarea>
-      <label for="attachments">Local attachment paths (one path per line)</label>
-      <textarea id="attachments" class="attachment-paths" placeholder="D:\\Screenshots\\bug.png"></textarea>
+      <label>Attachments <span class="muted tiny">Optional</span></label>
+      <div id="create-dropzone" class="dropzone" role="button" tabindex="0" aria-describedby="create-dropzone-help create-attachment-list">
+        <input id="create-attachments" class="visually-hidden" type="file" multiple aria-hidden="true" tabindex="-1">
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5"/><path d="M5 14.5v3A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5v-3"/></svg>
+        <span class="dropzone-title">Drop files here or <span>browse</span></span>
+        <span id="create-dropzone-help" class="muted tiny">Up to 10 files and 20 MB total</span>
+      </div>
+      <ul id="create-attachment-list" class="attachment-list muted tiny" aria-live="polite"><li>No files selected.</li></ul>
+      <details class="manual-attachments">
+        <summary>Use local file paths instead</summary>
+        <label for="attachments">Local attachment paths, one per line</label>
+        <textarea id="attachments" class="attachment-paths" placeholder="D:\\Screenshots\\bug.png"></textarea>
+      </details>
       <div class="note">Codex will use your installed $create-ticket skill. This action starts an AI run; it does not edit your application code by design of the skill.</div>
+      <div id="create-message" class="action-message" role="status" aria-live="polite"></div>
       <div class="dialog-actions">
         <button id="create-ticket-button" type="button">Create with Codex</button>
       </div>

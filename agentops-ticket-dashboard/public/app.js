@@ -13,6 +13,7 @@ const STATUS_ORDER = [
 let repoId = null;
 let ticketId = null;
 let selectedTab = "ticket.md";
+let createFiles = [];
 
 const byId = (id) => document.getElementById(id);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
@@ -302,19 +303,125 @@ function showCreate() {
   byId("new-dialog").showModal();
 }
 
+function formatFileSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderCreateFiles() {
+  const list = byId("create-attachment-list");
+  list.replaceChildren();
+  if (!createFiles.length) {
+    const empty = document.createElement("li");
+    empty.textContent = "No files selected.";
+    list.append(empty);
+    byId("create-dropzone-help").textContent = "Up to 10 files and 20 MB total";
+    return;
+  }
+  createFiles.forEach((file, index) => {
+    const item = document.createElement("li");
+    const name = document.createElement("span");
+    name.className = "attachment-file-name";
+    name.textContent = file.name;
+    const size = document.createElement("span");
+    size.className = "attachment-file-size muted";
+    size.textContent = formatFileSize(file.size);
+    const remove = document.createElement("button");
+    remove.className = "secondary attachment-remove";
+    remove.type = "button";
+    remove.textContent = "Remove";
+    remove.setAttribute("aria-label", `Remove ${file.name}`);
+    remove.addEventListener("click", () => {
+      createFiles.splice(index, 1);
+      renderCreateFiles();
+    });
+    item.append(name, size, remove);
+    list.append(item);
+  });
+  const total = createFiles.reduce((sum, file) => sum + file.size, 0);
+  const help = byId("create-dropzone-help");
+  help.textContent = `${createFiles.length} of 10 files · ${formatFileSize(total)} of 20 MB`;
+}
+
+function addCreateFiles(files) {
+  const incoming = [...files];
+  const combined = [...createFiles, ...incoming];
+  const totalSize = combined.reduce((sum, file) => sum + file.size, 0);
+  if (combined.length > 10) {
+    byId("create-message").className = "action-message error";
+    byId("create-message").textContent = "Choose no more than 10 files.";
+    return;
+  }
+  if (totalSize > 20 * 1024 * 1024) {
+    byId("create-message").className = "action-message error";
+    byId("create-message").textContent = "Attachments must total 20 MB or less.";
+    return;
+  }
+  createFiles = combined;
+  byId("create-message").textContent = "";
+  byId("create-message").className = "action-message";
+  renderCreateFiles();
+}
+
 async function createTicket() {
+  const button = byId("create-ticket-button");
+  const message = byId("create-message");
+  button.disabled = true;
+  button.textContent = "Starting…";
+  message.className = "action-message";
+  message.textContent = "Uploading attachments and starting the ticket run…";
   try {
-    await api("/api/run", post({
-      mode: "create",
-      description: byId("description").value,
-      attachments: byId("attachments").value.split("\n").map((path) => path.trim()).filter(Boolean),
-    }));
+    const form = new FormData();
+    form.append("mode", "create");
+    form.append("description", byId("description").value);
+    form.append("attachment_paths", JSON.stringify(byId("attachments").value.split("\n").map((path) => path.trim()).filter(Boolean)));
+    for (const file of createFiles) form.append("attachments", file, file.name);
+    await api("/api/run", { method: "POST", body: form });
     byId("new-dialog").close();
     byId("description").value = "";
+    byId("attachments").value = "";
+    byId("create-attachments").value = "";
+    createFiles = [];
+    renderCreateFiles();
     await refresh();
   } catch (error) {
-    alert(error.message);
+    message.className = "action-message error";
+    message.textContent = error.message;
+  } finally {
+    button.disabled = false;
+    button.textContent = "Create with Codex";
   }
+}
+
+function initCreateDropzone() {
+  const zone = byId("create-dropzone");
+  const input = byId("create-attachments");
+  zone.addEventListener("click", (event) => {
+    if (event.target !== input) input.click();
+  });
+  zone.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      input.click();
+    }
+  });
+  input.addEventListener("change", () => {
+    addCreateFiles(input.files);
+    input.value = "";
+  });
+  zone.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    zone.classList.add("is-dragging");
+  });
+  zone.addEventListener("dragleave", (event) => {
+    if (!zone.contains(event.relatedTarget)) zone.classList.remove("is-dragging");
+  });
+  zone.addEventListener("drop", (event) => {
+    event.preventDefault();
+    zone.classList.remove("is-dragging");
+    addCreateFiles(event.dataTransfer.files);
+  });
 }
 
 async function runTicket() {
@@ -415,6 +522,7 @@ byId("theme-light").addEventListener("click", () => setTheme("light"));
 byId("theme-dark").addEventListener("click", () => setTheme("dark"));
 byId("create-open-button").addEventListener("click", showCreate);
 byId("create-ticket-button").addEventListener("click", createTicket);
+initCreateDropzone();
 byId("process-button").addEventListener("click", runTicket);
 byId("complete-button").addEventListener("click", completeTicket);
 byId("request-changes-button").addEventListener("click", showRejection);

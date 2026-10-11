@@ -239,6 +239,22 @@ textarea.attachment-paths { min-height: 68px; }
 select { cursor: pointer; }
 .file-input { padding: 8px; }
 .file-input::file-selector-button { margin-right: 10px; padding: 7px 10px; border: 0; border-radius: 7px; background: var(--button-secondary); color: var(--text); font: inherit; font-weight: 600; cursor: pointer; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; clip-path: inset(50%); }
+.dropzone { display: flex; min-height: 120px; margin-top: 7px; padding: 18px; flex-direction: column; align-items: center; justify-content: center; gap: 6px; border: 1px dashed var(--field-border); border-radius: 10px; background: var(--field); color: var(--field-text); text-align: center; cursor: pointer; transition: border-color .16s ease, background-color .16s ease, box-shadow .16s ease; }
+.dropzone svg { width: 25px; height: 25px; margin-bottom: 2px; color: var(--focus); }
+.dropzone-title { font-size: 13px; font-weight: 600; }
+.dropzone-title span { color: var(--focus); text-decoration: underline; text-underline-offset: 3px; }
+.dropzone:hover, .dropzone:focus-visible, .dropzone.is-dragging { border-color: var(--focus); background: var(--ticket-active); }
+.dropzone:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.dropzone.is-dragging { box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 20%, transparent); }
+.attachment-list { display: grid; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
+.attachment-list li { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 9px; border: 1px solid var(--panel-border); border-radius: 8px; background: var(--ticket); }
+.attachment-file-name { min-width: 0; overflow-wrap: anywhere; color: var(--text); }
+.attachment-file-size { flex: none; }
+.attachment-remove { flex: none; padding: 3px 7px; font-size: 12px; }
+.manual-attachments { margin-top: 10px; color: var(--muted); font-size: 12px; }
+.manual-attachments summary { width: fit-content; cursor: pointer; }
+.manual-attachments label { margin-top: 10px; }
 label { display: block; margin: 14px 0 7px; color: var(--label); font-size: 13px; }
 .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
 .tabs button { padding: 8px 10px; font-size: 12px; }

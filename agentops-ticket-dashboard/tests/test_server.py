@@ -3,8 +3,27 @@ from pathlib import Path
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import server as dashboard_server
-from server import ROOT, tickets, detail, find_ticket_dir, local_request_allowed, active_ticket_count, complete_ticket, reject_ticket, public_asset, add_repository, REPOSITORIES, repository_id, runs_for_repository
+from server import ROOT, tickets, detail, find_ticket_dir, local_request_allowed, active_ticket_count, complete_ticket, reject_ticket, public_asset, add_repository, REPOSITORIES, repository_id, runs_for_repository, stage_create_uploads, MAX_FEEDBACK_UPLOAD, MAX_FEEDBACK_FILES
 class TestTicketReading(unittest.TestCase):
+    def test_create_uploads_are_staged_inside_repo_with_safe_unique_names(self):
+        with tempfile.TemporaryDirectory() as t:
+            repo=Path(t)
+            staging,paths=stage_create_uploads(repo,[
+                ('../screen shot.png',b'first'),
+                ('screen shot.png',b'second'),
+            ])
+            self.assertTrue(staging.is_relative_to(repo.resolve()))
+            self.assertEqual([Path(path).name for path in paths],['screen_shot.png','screen_shot-2.png'])
+            self.assertEqual([Path(path).read_bytes() for path in paths],[b'first',b'second'])
+            import shutil
+            shutil.rmtree(staging)
+    def test_create_upload_limits_are_enforced(self):
+        with tempfile.TemporaryDirectory() as t:
+            with self.assertRaisesRegex(ValueError,'no more than 10'):
+                stage_create_uploads(t,[(f'{i}.txt',b'x') for i in range(MAX_FEEDBACK_FILES+1)])
+            with self.assertRaisesRegex(ValueError,'20 MB or less'):
+                stage_create_uploads(t,[('large.bin',b'x'*(MAX_FEEDBACK_UPLOAD+1))])
+            self.assertEqual(list(Path(t).iterdir()),[])
     def test_repositories_can_be_registered_and_have_stable_ids(self):
         original=REPOSITORIES.copy()
         with tempfile.TemporaryDirectory() as t:
